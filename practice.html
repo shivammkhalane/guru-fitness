@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My First App</title>
+</head>
+<body>
+  <h1>My First App</h1>
+  <p id="message">I am learning coding</p>
+  <button type="button" id="clickBtn">Click Me</button>
+
+  <script>
+    const message = document.getElementById('message');
+    const button = document.getElementById('clickBtn');
+
+    button.addEventListener('click', function () {
+      message.textContent = 'I clicked the button!';
+    });
+  </script>
+</body>
+</html>
