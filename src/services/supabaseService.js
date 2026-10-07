@@ -201,10 +201,17 @@ export const createAuditLog = async (action, entityName, entityId = null, metada
 
   const { data: userData } = await supabase.auth.getUser()
   const userId = userData?.user?.id ?? null
+  const { data: profile, error: profileError } = userId
+    ? await supabase.from('profiles').select('gym_id').eq('id', userId).maybeSingle()
+    : { data: null, error: null }
+
+  if (profileError) throw profileError
+  const gym = profile?.gym_id ? null : await ensureGymSetup()
 
   const { data, error } = await supabase
     .from('audit_logs')
     .insert({
+      gym_id: profile?.gym_id || gym.id,
       action,
       entity_name: entityName,
       entity_id: entityId,

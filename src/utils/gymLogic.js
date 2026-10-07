@@ -105,7 +105,8 @@ export const getExpiringSoonMembers = (members) => {
 }
 
 export const toDateInputValue = (value) => {
-  const date = new Date(`${value}T00:00:00`)
+  const isoDate = String(value || '').slice(0, 10)
+  const date = new Date(`${isoDate}T00:00:00Z`)
   return !Number.isNaN(date.getTime()) ? date.toISOString().slice(0, 10) : ''
 }
 

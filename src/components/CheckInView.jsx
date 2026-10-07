@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import Avatar from './Avatar'
+import MemberPhoto from './MemberPhoto'
 import {
   displayMemberCode,
   formatDate,
@@ -49,11 +49,7 @@ export default function CheckInView({
     return (
       <div className="checkin-member-card panel-card">
         <div className="profile-summary-row">
-          {member.photo ? (
-            <img src={member.photo} alt="" className="member-photo-thumb" />
-          ) : (
-            <Avatar name={member.name} size="large" />
-          )}
+          <MemberPhoto path={member.photo} name={member.name} size="checkin" />
           <div>
             <h3>{member.name}</h3>
             <p className="member-code-display">Code {code}</p>
@@ -142,7 +138,7 @@ export default function CheckInView({
             <>
               {renderMemberCard(checkInState.member)}
               <p className="result-title success-title">Already Present Today</p>
-              <p className="attendance-time">Checked in at {checkInState.time}</p>
+              <p className="attendance-time">Original check-in: {checkInState.time}</p>
               <button type="button" className="secondary-button block" onClick={onNextMember}>
                 Next member
               </button>

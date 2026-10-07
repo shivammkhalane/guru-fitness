@@ -1,6 +1,7 @@
 import { gymSettings, initialMembers, initialPayments } from '../data/mockData'
 import { getTodayIsoKolkata, parseReceptionMemberCode } from '../utils/gymLogic'
 import { isSupabaseReady, supabase, ensureGymSetup, createAuditLog } from './supabaseService'
+import { removeMemberPhoto, uploadMemberPhoto } from './memberPhotoService'
 
 const STORAGE_KEYS = {
   members: 'guru-fitness-members',
@@ -46,6 +47,20 @@ const normalizeLegacyDigits = (value) => {
   return digits.padStart(3, '0')
 }
 
+const normalizePhoneNumber = (value) => String(value ?? '').replace(/\D/g, '')
+
+const normalizePaymentMethod = (value, fallback = 'cash') => {
+  const cleaned = String(value ?? fallback).trim().toLowerCase().replace(/\s+/g, '_')
+  const validMethods = ['cash', 'upi', 'card', 'bank_transfer']
+  return validMethods.includes(cleaned) ? cleaned : fallback
+}
+
+const addDaysToIso = (isoDate, days) => {
+  const date = new Date(`${isoDate}T00:00:00Z`)
+  date.setUTCDate(date.getUTCDate() + Number(days || 0))
+  return date.toISOString().slice(0, 10)
+}
+
 const resolveMemberCode = (value) => {
   return parseReceptionMemberCode(value) || parseReceptionMemberCode(normalizeLegacyDigits(value))
 }
@@ -61,11 +76,13 @@ const normalizeSupabaseMember = (memberRow, membershipRow, planRow, attendanceRo
     name: memberRow.full_name,
     phone: memberRow.phone,
     plan: planRow?.name || membershipRow?.plan_name || 'Monthly',
+    planId: planRow?.id || membershipRow?.plan_id || memberRow.plan_id || null,
     fee: Number(membershipRow?.amount || planRow?.price || 500),
-    startDate: membershipRow?.start_date || memberRow.created_at?.slice(0, 10) || new Date().toISOString().slice(0, 10),
+    startDate: membershipRow?.start_date || memberRow.created_at?.slice(0, 10) || getTodayIsoKolkata(),
     expiryDate: membershipRow?.expiry_date || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
     paymentMethod: membershipRow?.payment_method ? membershipRow.payment_method.toUpperCase() : 'Cash',
     photo: memberRow.photo_url || '',
+    status: memberRow.status || 'active',
     attendanceHistory: (attendanceRows || []).map((entry) => ({
       date: entry.attendance_date,
       time: formatDisplayTime(entry.check_in_time),
@@ -73,6 +90,67 @@ const normalizeSupabaseMember = (memberRow, membershipRow, planRow, attendanceRo
       rawStatus: entry.status,
     })),
   }
+}
+
+const getActiveGym = async () => {
+  const { data: gymData } = await supabase
+    .from('gyms')
+    .select('id, slug, name, city, state, country, currency, timezone')
+    .eq('slug', 'guru-fitness-health-club')
+    .maybeSingle()
+
+  if (gymData) return gymData
+  return ensureGymSetup()
+}
+
+const getPlanBySelection = async (gymId, payload = {}) => {
+  const planId = payload.planId || payload.plan_id || payload.planID || null
+  const planName = String(payload.plan || payload.planName || '').trim()
+
+  if (planId) {
+    const { data: planRow, error: planError } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .eq('gym_id', gymId)
+      .eq('id', planId)
+      .maybeSingle()
+
+    if (planError) throw planError
+    if (!planRow) throw new Error('The selected membership plan no longer exists in the gym plan list.')
+    return planRow
+  }
+
+  if (planName) {
+    const { data: planRow, error: planError } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .eq('gym_id', gymId)
+      .eq('name', planName)
+      .maybeSingle()
+
+    if (planError) throw planError
+    if (!planRow) {
+      throw new Error(`Membership plan "${planName}" does not exist for this gym. Please choose a valid plan.`)
+    }
+    return planRow
+  }
+
+  const { data: fallbackPlan, error: fallbackPlanError } = await supabase
+    .from('membership_plans')
+    .select('*')
+    .eq('gym_id', gymId)
+    .order('price', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (fallbackPlanError && fallbackPlanError.code !== 'PGRST116') throw fallbackPlanError
+  if (!fallbackPlan) throw new Error('No active membership plans are available for this gym.')
+  return fallbackPlan
+}
+
+const ensureSafeMembershipStatus = (status) => {
+  const value = String(status || 'active').trim()
+  return ['active', 'expiring_soon', 'expired', 'frozen', 'cancelled', 'archived'].includes(value) ? value : 'active'
 }
 
 const collectUsedMemberCodes = (codeRows) => {
@@ -91,8 +169,6 @@ const pickNextMemberCode = (usedCodes) => {
   }
   throw new Error('No available member code slots remain for this gym (101–999).')
 }
-
-const generateNextMemberCodeLocal = (members) => pickNextMemberCode(collectUsedMemberCodes(members))
 
 const generateNextMemberCode = async (gymId) => {
   if (!isSupabaseReady || !supabase) return '101'
@@ -123,6 +199,20 @@ const fallbackSettingsRepository = {
 
 export const memberRepository = {
   ...fallbackMemberRepository,
+  async getMembershipPlans() {
+    if (!isSupabaseReady || !supabase) return []
+
+    const gymData = await getActiveGym()
+    const { data, error } = await supabase
+      .from('membership_plans')
+      .select('*')
+      .eq('gym_id', gymData.id)
+      .eq('is_active', true)
+      .order('price', { ascending: true })
+
+    if (error) throw error
+    return data || []
+  },
   async getMembersFromSupabase() {
     if (!isSupabaseReady || !supabase) return fallbackMemberRepository.getMembers()
 
@@ -150,11 +240,27 @@ export const memberRepository = {
       attendanceByMember.set(attendance.member_id, current)
     }
 
-    return (memberRows || []).map((memberRow) => {
-      const membership = membershipByMember.get(memberRow.id)
-      const plan = membership ? planById.get(membership.plan_id) : (memberRow.plan_id ? planById.get(memberRow.plan_id) : null)
-      return normalizeSupabaseMember(memberRow, membership, plan, attendanceByMember.get(memberRow.id) || [])
-    })
+    return (memberRows || [])
+      .filter((memberRow) => memberRow.status !== 'archived')
+      .map((memberRow) => {
+        const membership = membershipByMember.get(memberRow.id)
+        const plan = membership ? planById.get(membership.plan_id) : (memberRow.plan_id ? planById.get(memberRow.plan_id) : null)
+        return normalizeSupabaseMember(memberRow, membership, plan, attendanceByMember.get(memberRow.id) || [])
+      })
+  },
+  async getMemberActivity(memberId) {
+    if (!isSupabaseReady || !supabase || !memberId) return []
+    const gymData = await getActiveGym()
+    const { data, error } = await supabase
+      .from('audit_logs')
+      .select('id, action, created_at, metadata')
+      .eq('gym_id', gymData.id)
+      .eq('entity_name', 'members')
+      .eq('entity_id', memberId)
+      .order('created_at', { ascending: false })
+      .limit(20)
+    if (error) throw error
+    return data || []
   },
   async getMemberByCode(codeInput) {
     const code = parseReceptionMemberCode(codeInput)
@@ -168,13 +274,7 @@ export const memberRepository = {
       )
     }
 
-    const { data: gymData } = await supabase
-      .from('gyms')
-      .select('id')
-      .eq('slug', 'guru-fitness-health-club')
-      .maybeSingle()
-
-    if (!gymData) return null
+    const gymData = await getActiveGym()
 
     const { data: memberRow } = await supabase
       .from('members')
@@ -183,7 +283,7 @@ export const memberRepository = {
       .eq('member_code', code)
       .maybeSingle()
 
-    if (!memberRow) return null
+    if (!memberRow || memberRow.status === 'archived') return null
 
     const [{ data: memberships }, { data: plans }, { data: attendanceRows }] = await Promise.all([
       supabase.from('memberships').select('*').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('created_at', { ascending: false }),
@@ -204,15 +304,8 @@ export const memberRepository = {
       ? qrToken.split(':').pop().trim()
       : String(qrToken).trim()
 
-    const { data: gymData } = await supabase
-      .from('gyms')
-      .select('id')
-      .eq('slug', 'guru-fitness-health-club')
-      .maybeSingle()
+    const gymData = await getActiveGym()
 
-    if (!gymData) return null
-
-    // Look up by qr_token scoped to current gym (cross-gym protection)
     let { data: memberRow, error: memberError } = await supabase
       .from('members')
       .select('*')
@@ -220,7 +313,6 @@ export const memberRepository = {
       .eq('qr_token', cleanToken)
       .maybeSingle()
 
-    // Also support scanning member_code fallback
     if (memberError || !memberRow) {
       const { data: fallbackRow } = await supabase
         .from('members')
@@ -232,6 +324,8 @@ export const memberRepository = {
       if (!fallbackRow) return null
       memberRow = fallbackRow
     }
+
+    if (memberRow.status === 'archived') return null
 
     const [{ data: memberships }, { data: plans }, { data: attendanceRows }] = await Promise.all([
       supabase.from('memberships').select('*').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('created_at', { ascending: false }),
@@ -248,14 +342,7 @@ export const memberRepository = {
   async regenerateMemberQrToken(memberId) {
     if (!isSupabaseReady || !supabase) return null
 
-    const { data: gymData } = await supabase
-      .from('gyms')
-      .select('id')
-      .eq('slug', 'guru-fitness-health-club')
-      .maybeSingle()
-
-    if (!gymData) return null
-
+    const gymData = await getActiveGym()
     const nextToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `qr-${Date.now()}`
 
     const { data, error } = await supabase
@@ -269,118 +356,263 @@ export const memberRepository = {
     if (error) throw error
     return data?.qr_token || nextToken
   },
-  async createMember(memberPayload) {
+  async createMember(memberPayload = {}) {
+    const payload = { ...memberPayload }
+    const fullName = String(payload.fullName || payload.name || '').trim()
+    if (!fullName) throw new Error('Full name is required.')
+    if (!payload.photoFile) throw new Error('Please upload a profile photograph.')
+
+    const normalizedPhone = normalizePhoneNumber(payload.phone)
+    if (!normalizedPhone) throw new Error('Phone number is required.')
+
     if (!isSupabaseReady || !supabase) {
-      const members = fallbackMemberRepository.getMembers()
-      const manualCode = resolveMemberCode(memberPayload.memberCode || memberPayload.memberId)
-      const memberCode = manualCode || generateNextMemberCodeLocal(members)
-      const nextMember = {
-        name: memberPayload.fullName || memberPayload.name,
-        memberId: memberCode,
-        memberCode,
-        phone: memberPayload.phone,
-        plan: memberPayload.plan || 'Monthly',
-        fee: Number(memberPayload.fee || 500),
-        startDate: memberPayload.startDate,
-        expiryDate: memberPayload.expiryDate,
-        paymentMethod: memberPayload.paymentMethod || 'Cash',
-        photo: memberPayload.photo || '',
-        qrToken: `qr-${Date.now()}`,
-        attendanceHistory: [],
+      throw new Error('Member registration with photographs requires a live Supabase Storage connection.')
+    }
+
+    const gymData = await getActiveGym()
+    const selectedPlan = await getPlanBySelection(gymData.id, payload)
+
+    const suppliedCode = resolveMemberCode(payload.memberCode || payload.memberId || payload.member_code)
+    if (suppliedCode) {
+      const numericCode = Number(suppliedCode)
+      if (!Number.isInteger(numericCode) || numericCode < 101 || numericCode > 999) {
+        throw new Error('Member code must be a numeric value between 101 and 999.')
       }
-      const nextMembers = [nextMember, ...members]
-      fallbackMemberRepository.saveMembers(nextMembers)
-      return nextMember
     }
 
-    let { data: gymData } = await supabase
-      .from('gyms')
-      .select('id')
-      .eq('slug', 'guru-fitness-health-club')
-      .maybeSingle()
-
-    if (!gymData) {
-      gymData = await ensureGymSetup()
-    }
-
-    const planName = memberPayload.plan || 'Monthly'
-    const planDuration = planName.toLowerCase().includes('year') ? 365 : planName.toLowerCase().includes('quarter') ? 90 : 30
-
-    const { data: planData, error: planError } = await supabase
-      .from('membership_plans')
-      .upsert(
-        {
-          gym_id: gymData.id,
-          name: planName,
-          duration_days: planDuration,
-          price: Number(memberPayload.fee || 500),
-          is_active: true,
-        },
-        { onConflict: 'gym_id,name' },
-      )
-      .select('id, name, price')
-      .single()
-
-    if (planError) throw planError
-
-    const manualCode = resolveMemberCode(memberPayload.memberCode || memberPayload.memberId)
-    const generatedMemberCode = manualCode || (await generateNextMemberCode(gymData.id))
-
-    const { data: memberData, error: memberError } = await supabase
+    const { data: existingPhoneRows, error: phoneCheckError } = await supabase
       .from('members')
-      .insert({
-        gym_id: gymData.id,
-        member_code: generatedMemberCode,
-        full_name: memberPayload.name || memberPayload.fullName,
-        phone: memberPayload.phone,
-        photo_url: memberPayload.photo || null,
-        plan_id: planData.id,
-        status: 'active',
-      })
+      .select('id, phone, member_code')
+      .eq('gym_id', gymData.id)
+
+    if (phoneCheckError) throw phoneCheckError
+
+    const duplicatePhone = (existingPhoneRows || []).find((row) => normalizePhoneNumber(row.phone) === normalizedPhone)
+    if (duplicatePhone) {
+      throw new Error(`A member with phone number ${normalizedPhone} already exists in this gym.`)
+    }
+
+    const generatedMemberCode = suppliedCode || (await generateNextMemberCode(gymData.id))
+    const startDate = payload.startDate || getTodayIsoKolkata()
+    const expiryDate = payload.expiryDate && payload.expiryDate !== startDate
+      ? payload.expiryDate
+      : addDaysToIso(startDate, Number(selectedPlan.duration_days || 30))
+
+    const { data: existingCodeRows, error: codeCheckError } = await supabase
+      .from('members')
+      .select('id, member_code')
+      .eq('gym_id', gymData.id)
+
+    if (codeCheckError) throw codeCheckError
+
+    if ((existingCodeRows || []).some((row) => resolveMemberCode(row.member_code) === generatedMemberCode)) {
+      throw new Error(`Member code ${generatedMemberCode} is already in use for this gym.`)
+    }
+
+    const memberInsert = {
+      gym_id: gymData.id,
+      member_code: generatedMemberCode,
+      full_name: fullName,
+      phone: normalizedPhone,
+      photo_url: null,
+      plan_id: selectedPlan.id,
+      status: 'active',
+    }
+
+    let { data: memberData, error: memberError } = await supabase
+      .from('members')
+      .insert(memberInsert)
       .select('*')
       .single()
 
     if (memberError) throw memberError
 
-    const paymentMethodClean = (memberPayload.paymentMethod || 'cash').toLowerCase().replace(/\s+/g, '_')
-    const validPaymentMethods = ['cash', 'upi', 'card', 'bank_transfer']
-    const safePaymentMethod = validPaymentMethods.includes(paymentMethodClean) ? paymentMethodClean : 'cash'
+    let photoPath
+    try {
+      photoPath = await uploadMemberPhoto(gymData.id, memberData.id, payload.photoFile)
+      const { data: memberWithPhoto, error: photoUpdateError } = await supabase
+        .from('members')
+        .update({ photo_url: photoPath })
+        .eq('id', memberData.id)
+        .select('*')
+        .single()
+      if (photoUpdateError) throw photoUpdateError
+      memberData = memberWithPhoto
+    } catch (photoError) {
+      if (photoPath) {
+        try {
+          await removeMemberPhoto(photoPath)
+        } catch {
+          // Preserve the upload error for the form.
+        }
+      }
+      await supabase.from('members').delete().eq('id', memberData.id)
+      throw new Error(`Profile photo upload failed: ${photoError.message || 'Unable to save the photograph.'}`)
+    }
+
+    const paymentMethod = normalizePaymentMethod(payload.paymentMethod || payload.payment_method || 'cash')
+    const amount = Number(payload.fee ?? selectedPlan.price ?? 0)
 
     const { data: membershipData, error: membershipError } = await supabase
       .from('memberships')
       .insert({
         gym_id: gymData.id,
         member_id: memberData.id,
-        plan_id: planData.id,
-        start_date: memberPayload.startDate,
-        expiry_date: memberPayload.expiryDate,
-        amount: Number(memberPayload.fee || 500),
-        payment_method: safePaymentMethod,
+        plan_id: selectedPlan.id,
+        start_date: startDate,
+        expiry_date: expiryDate,
+        amount,
+        payment_method: paymentMethod,
         status: 'active',
       })
       .select('*')
       .single()
 
-    if (membershipError) throw membershipError
+    if (membershipError) throw new Error(`Membership creation failed: ${membershipError.message || 'Unknown error'}`)
 
-    // Also record initial payment in payments table
-    try {
-      await supabase.from('payments').insert({
+    const shouldCreatePayment = payload.paymentMade !== false && amount > 0 && ['cash', 'upi', 'card', 'bank_transfer'].includes(paymentMethod)
+    if (shouldCreatePayment) {
+      const { error: paymentError } = await supabase.from('payments').insert({
         gym_id: gymData.id,
         member_id: memberData.id,
         receipt_number: `REC-${Date.now().toString().slice(-6)}`,
-        amount: Number(memberPayload.fee || 500),
-        payment_date: memberPayload.startDate || new Date().toISOString().slice(0, 10),
-        payment_method: safePaymentMethod,
+        amount,
+        payment_date: startDate,
+        payment_method: paymentMethod,
         status: 'paid',
-        notes: `${planName} Plan Registration`,
+        notes: `${selectedPlan.name} Plan Registration`,
       })
-      await createAuditLog('member_created', 'members', memberData.id, { memberCode, name: memberPayload.fullName || memberPayload.name })
-    } catch {
-      // Non-critical background log
+
+      if (paymentError) {
+        throw new Error(`Payment creation failed: ${paymentError.message || 'Unable to record the initial payment.'}`)
+      }
     }
 
-    return normalizeSupabaseMember(memberData, membershipData, planData, [])
+    try {
+      await createAuditLog('member_created', 'members', memberData.id, {
+        memberCode: generatedMemberCode,
+        full_name: fullName,
+        plan_id: selectedPlan.id,
+        plan_name: selectedPlan.name,
+        payment_method: paymentMethod,
+      })
+    } catch {
+      // Non-blocking audit logging; the member creation remains successful.
+    }
+
+    return normalizeSupabaseMember(memberData, membershipData, selectedPlan, [])
+  },
+  async editMember(memberId, payload = {}) {
+    if (!isSupabaseReady || !supabase) return null
+
+    const gymData = await getActiveGym()
+    const memberRecord = await supabase
+      .from('members')
+      .select('*')
+      .eq('gym_id', gymData.id)
+      .or(`id.eq.${memberId},member_code.eq.${memberId}`)
+      .maybeSingle()
+
+    if (!memberRecord.data) throw new Error('Member not found.')
+
+    const nextFullName = String(payload.full_name || payload.fullName || memberRecord.data.full_name || '').trim()
+    const nextPhone = normalizePhoneNumber(payload.phone || payload.phoneNumber)
+    if (!nextFullName) throw new Error('Full name is required.')
+    if (!nextPhone) throw new Error('Phone number is required.')
+
+    const { data: duplicateRows } = await supabase
+      .from('members')
+      .select('id, phone')
+      .eq('gym_id', gymData.id)
+
+    const duplicatePhoneRow = (duplicateRows || []).find((row) => {
+      if (row.id === memberRecord.data.id) return false
+      return normalizePhoneNumber(row.phone) === nextPhone
+    })
+
+    if (duplicatePhoneRow) {
+      throw new Error(`Another member already has phone number ${nextPhone}.`)
+    }
+
+    const updatePayload = {
+      full_name: nextFullName,
+      phone: nextPhone,
+      updated_at: new Date().toISOString(),
+    }
+
+    if (payload.photoFile) {
+      updatePayload.photo_url = await uploadMemberPhoto(gymData.id, memberRecord.data.id, payload.photoFile)
+    }
+
+    const { data: updatedMember, error: updateError } = await supabase
+      .from('members')
+      .update(updatePayload)
+      .eq('id', memberRecord.data.id)
+      .select('*')
+      .single()
+
+    if (updateError) throw updateError
+
+    try {
+      await createAuditLog('member_updated', 'members', updatedMember.id, {
+        full_name: nextFullName,
+        phone: nextPhone,
+      })
+    } catch {
+      // Non-blocking audit logging; member update already succeeded.
+    }
+
+    const [{ data: memberships }, { data: plans }, { data: attendanceRows }] = await Promise.all([
+      supabase.from('memberships').select('*').eq('gym_id', gymData.id).eq('member_id', updatedMember.id).order('created_at', { ascending: false }),
+      supabase.from('membership_plans').select('*').eq('gym_id', gymData.id),
+      supabase.from('attendance').select('*').eq('gym_id', gymData.id).eq('member_id', updatedMember.id).order('attendance_date', { ascending: false }),
+    ])
+
+    const planById = new Map((plans || []).map((p) => [p.id, p]))
+    const latestMembership = memberships?.[0] || null
+    const plan = latestMembership ? planById.get(latestMembership.plan_id) : (updatedMember.plan_id ? planById.get(updatedMember.plan_id) : null)
+
+    return normalizeSupabaseMember(updatedMember, latestMembership, plan, attendanceRows || [])
+  },
+  async archiveMember(memberId) {
+    if (!isSupabaseReady || !supabase) return null
+
+    const gymData = await getActiveGym()
+    const { data: memberRow, error: fetchError } = await supabase
+      .from('members')
+      .select('*')
+      .eq('gym_id', gymData.id)
+      .or(`id.eq.${memberId},member_code.eq.${memberId}`)
+      .maybeSingle()
+
+    if (fetchError) throw fetchError
+    if (!memberRow) throw new Error('Member not found.')
+    if (memberRow.status === 'archived') return normalizeSupabaseMember(memberRow, null, null, [])
+
+    const { data: updatedMember, error: archiveError } = await supabase
+      .from('members')
+      .update({ status: 'archived', updated_at: new Date().toISOString() })
+      .eq('id', memberRow.id)
+      .select('*')
+      .single()
+
+    if (archiveError) {
+      const message = String(archiveError.message || '')
+      if (message.includes('members_status_check') || message.includes('archived')) {
+        throw new Error('Archive is blocked until the live Supabase schema allows the archived status. Apply the migration in supabase/migrations/004_allow_archived_member_status.sql to the project database.')
+      }
+      throw archiveError
+    }
+
+    try {
+      await createAuditLog('member_archived', 'members', updatedMember.id, {
+        memberCode: updatedMember.member_code,
+      })
+    } catch {
+      // Non-blocking audit logging; archive already succeeded.
+    }
+
+    return normalizeSupabaseMember(updatedMember, null, null, [])
   },
   async recordAttendance(memberId, status = 'present') {
     const code = resolveMemberCode(memberId)
@@ -447,51 +679,83 @@ export const memberRepository = {
     const { data: authUser } = await supabase.auth.getUser()
     const recordedBy = authUser?.user?.id || null
 
-    const { data: attData, error } = await supabase.from('attendance').upsert({
+    const payload = {
       gym_id: gymData.id,
       member_id: memberRow.id,
       attendance_date: todayIso,
       check_in_time: checkInTime,
       status: status === 'present' ? 'present' : status,
       recorded_by: recordedBy,
-    }, { onConflict: 'gym_id,member_id,attendance_date' }).select('*').single()
+    }
 
-    if (error) throw error
+    const { data: attData, error } = await supabase
+      .from('attendance')
+      .insert(payload)
+      .select('*')
+      .single()
+
+    if (error) {
+      if (error.code === '23505') {
+        const { data: existingRow, error: fetchError } = await supabase
+          .from('attendance')
+          .select('*')
+          .eq('gym_id', gymData.id)
+          .eq('member_id', memberRow.id)
+          .eq('attendance_date', todayIso)
+          .maybeSingle()
+
+        if (fetchError) throw fetchError
+
+        return {
+          memberId: memberRow.member_code,
+          name: memberRow.full_name,
+          date: todayIso,
+          time: formatDisplayTime(existingRow?.check_in_time || checkInTime),
+          status: 'Present',
+          alreadyMarked: true,
+          originalTime: existingRow ? formatDisplayTime(existingRow.check_in_time) : formatDisplayTime(checkInTime),
+        }
+      }
+      throw error
+    }
 
     return {
       memberId: memberRow.member_code,
       name: memberRow.full_name,
       date: todayIso,
-      time: formatDisplayTime(checkInTime),
+      time: formatDisplayTime(attData?.check_in_time || checkInTime),
       status: 'Present',
+      alreadyMarked: false,
     }
   },
   async renewMembership(memberId, { amount, expiryDate, paymentMethod = 'Cash' }) {
     if (!isSupabaseReady || !supabase) return
 
-    const { data: gymData } = await supabase
+    const { data: gymData, error: gymError } = await supabase
       .from('gyms')
       .select('id')
       .eq('slug', 'guru-fitness-health-club')
       .maybeSingle()
 
-    if (!gymData) return
+    if (gymError) throw gymError
+    if (!gymData) throw new Error('Gym not found for membership renewal.')
 
-    const { data: memberRow } = await supabase
+    const { data: memberRow, error: memberError } = await supabase
       .from('members')
       .select('id, plan_id')
       .eq('gym_id', gymData.id)
       .eq('member_code', memberId)
       .maybeSingle()
 
-    if (!memberRow) return
+    if (memberError) throw memberError
+    if (!memberRow) throw new Error('Member not found for membership renewal.')
 
-    const todayIso = new Date().toISOString().slice(0, 10)
+    const todayIso = getTodayIsoKolkata()
     const paymentMethodClean = (paymentMethod || 'cash').toLowerCase().replace(/\s+/g, '_')
     const validPaymentMethods = ['cash', 'upi', 'card', 'bank_transfer']
     const safePaymentMethod = validPaymentMethods.includes(paymentMethodClean) ? paymentMethodClean : 'cash'
 
-    await supabase.from('memberships').insert({
+    const { error: membershipError } = await supabase.from('memberships').insert({
       gym_id: gymData.id,
       member_id: memberRow.id,
       plan_id: memberRow.plan_id,
@@ -501,8 +765,9 @@ export const memberRepository = {
       payment_method: safePaymentMethod,
       status: 'active',
     })
+    if (membershipError) throw new Error(`Membership renewal failed: ${membershipError.message || 'Unknown error'}`)
 
-    await supabase.from('payments').insert({
+    const { error: paymentError } = await supabase.from('payments').insert({
       gym_id: gymData.id,
       member_id: memberRow.id,
       receipt_number: `REC-${Date.now().toString().slice(-6)}`,
@@ -512,18 +777,80 @@ export const memberRepository = {
       status: 'paid',
       notes: 'Membership Renewal',
     })
+    if (paymentError) throw new Error(`Renewal payment failed: ${paymentError.message || 'Unknown error'}`)
 
-    await createAuditLog('membership_renewed', 'memberships', memberRow.id, { expiryDate, amount })
+    try {
+      await createAuditLog('membership_renewed', 'memberships', memberRow.id, { expiryDate, amount })
+    } catch {
+      // Non-critical background audit entry
+    }
   }
 }
 
 export const paymentRepository = {
   ...fallbackPaymentRepository,
+  async recordPayment(payload = {}) {
+    if (!isSupabaseReady || !supabase) throw new Error('Recording a payment requires a live Supabase connection.')
+
+    const amount = Number(payload.amount)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter a payment amount greater than zero.')
+
+    const gymData = await getActiveGym()
+    const { data: member, error: memberError } = await supabase
+      .from('members')
+      .select('id, member_code, full_name')
+      .eq('gym_id', gymData.id)
+      .eq('member_code', String(payload.memberCode || ''))
+      .maybeSingle()
+    if (memberError) throw memberError
+    if (!member) throw new Error('Member not found for this payment.')
+
+    const paymentMethod = normalizePaymentMethod(payload.paymentMethod)
+    const receiptNumber = `REC-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    const paymentDate = payload.paymentDate || getTodayIsoKolkata()
+    const { data: payment, error: paymentError } = await supabase
+      .from('payments')
+      .insert({
+        gym_id: gymData.id,
+        member_id: member.id,
+        receipt_number: receiptNumber,
+        amount,
+        payment_date: paymentDate,
+        payment_method: paymentMethod,
+        status: 'paid',
+        notes: String(payload.notes || 'Member payment').trim(),
+      })
+      .select('*')
+      .single()
+    if (paymentError) throw paymentError
+
+    try {
+      await createAuditLog('payment_received', 'payments', payment.id, {
+        memberCode: member.member_code,
+        receiptNumber,
+        amount,
+      })
+    } catch {
+      // Audit logging is non-blocking after the payment is confirmed.
+    }
+
+    return {
+      id: payment.id,
+      member: member.full_name,
+      memberCode: member.member_code,
+      receiptNumber: payment.receipt_number,
+      amount: Number(payment.amount),
+      date: payment.payment_date,
+      method: payment.payment_method.toUpperCase(),
+      period: payment.notes || 'Member payment',
+      status: payment.status === 'paid' ? 'Paid' : 'Pending',
+    }
+  },
   async getPaymentsFromSupabase() {
     if (!isSupabaseReady || !supabase) return fallbackPaymentRepository.getPayments()
 
     const [{ data: paymentRows, error: payErr }, { data: memberRows }] = await Promise.all([
-      supabase.from('payments').select('*').order('payment_date', { ascending: false }),
+      supabase.from('payments').select('*').order('created_at', { ascending: false }),
       supabase.from('members').select('id, full_name, member_code'),
     ])
 
@@ -538,6 +865,7 @@ export const paymentRepository = {
         id: p.id,
         member: mem ? mem.full_name : 'Member',
         memberCode: mem ? mem.member_code : '',
+        receiptNumber: p.receipt_number,
         amount: Number(p.amount || 0),
         date: p.payment_date,
         method: (p.payment_method || 'cash').toUpperCase(),
@@ -595,13 +923,18 @@ export const gymRepository = {
   savePayments: fallbackPaymentRepository.savePayments,
   getSettings: fallbackSettingsRepository.getSettings,
   saveSettings: fallbackSettingsRepository.saveSettings,
+  getMembershipPlans: memberRepository.getMembershipPlans,
   getMembersFromSupabase: memberRepository.getMembersFromSupabase,
+  getMemberActivity: memberRepository.getMemberActivity,
   getMemberByCode: memberRepository.getMemberByCode,
   getMemberByQrToken: memberRepository.getMemberByQrToken,
   regenerateMemberQrToken: memberRepository.regenerateMemberQrToken,
   createMember: memberRepository.createMember,
+  editMember: memberRepository.editMember,
+  archiveMember: memberRepository.archiveMember,
   recordAttendance: memberRepository.recordAttendance,
   renewMembership: memberRepository.renewMembership,
+  recordPayment: paymentRepository.recordPayment,
   getPaymentsFromSupabase: paymentRepository.getPaymentsFromSupabase,
   getSettingsFromSupabase: settingsRepository.getSettingsFromSupabase,
   saveSettingsToSupabase: settingsRepository.saveSettingsToSupabase,
