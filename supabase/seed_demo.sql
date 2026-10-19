@@ -52,7 +52,7 @@ BEGIN
     (demo_gym_id, '112', 'Mehul Patil', '9876543221', NULL, 'active'),
     (demo_gym_id, '113', 'Pooja Yadav', '9876543222', NULL, 'active'),
     (demo_gym_id, '114', 'Harshad Joshi', '9876543223', NULL, 'expired'),
-    (demo_gym_id, '115', 'Kavya Patil', '9876543224', NULL, 'expiring_soon'),
+    (demo_gym_id, '115', 'Kavya Patil', '9876543224', NULL, 'active'),
     (demo_gym_id, '116', 'Ajay Verma', '9876543225', NULL, 'active'),
     (demo_gym_id, '117', 'Tanvi Suryawanshi', '9876543226', NULL, 'active'),
     (demo_gym_id, '118', 'Dinesh Shinde', '9876543227', NULL, 'active');
@@ -97,7 +97,7 @@ BEGIN
       WHEN '112' THEN current_date + 17
       WHEN '113' THEN current_date + 16
       WHEN '114' THEN current_date - 4
-      WHEN '115' THEN current_date + 3
+      WHEN '115' THEN current_date + 10
       WHEN '116' THEN current_date + 22
       WHEN '117' THEN current_date + 14
       WHEN '118' THEN current_date + 18

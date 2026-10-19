@@ -23,11 +23,11 @@ export const getWhatsAppIntegrationStatus = async () => {
   return { configured: data?.configured === true }
 }
 
-export const sendWhatsAppNotification = async (memberCode, eventType) => {
+export const sendWhatsAppNotification = async (memberCode, eventType, additionalPayload = {}) => {
   if (!isSupabaseReady || !supabase) throw new Error('WhatsApp integration not configured.')
 
   const { data, error } = await supabase.functions.invoke('whatsapp-notifications', {
-    body: { action: 'send', memberCode, eventType },
+    body: { action: 'send', memberCode, eventType, ...additionalPayload },
   })
   if (error) {
     const message = await readFunctionError(error)

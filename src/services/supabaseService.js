@@ -145,12 +145,21 @@ export const ensureCurrentUserProfile = async ({
 
   let profile
   if (existingProfile) {
+    // Never overwrite an existing role on sign-in. The `role` field is only
+    // applied when a profile is first created — otherwise every login would
+    // re-assert `role: 'owner'` and escalate staff/member accounts.
+    const updatePayload = {
+      id: profilePayload.id,
+      gym_id: profilePayload.gym_id,
+      full_name: profilePayload.full_name,
+      phone: profilePayload.phone,
+      avatar_url: profilePayload.avatar_url,
+      updated_at: new Date().toISOString(),
+    }
+
     const { data, error } = await supabase
       .from('profiles')
-      .update({
-        ...profilePayload,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updatePayload)
       .eq('id', user.id)
       .select('*')
       .single()
@@ -223,4 +232,174 @@ export const createAuditLog = async (action, entityName, entityId = null, metada
 
   if (error) throw error
   return data
+}
+
+export const signInWithGoogle = async () => {
+  assertSupabase()
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: window.location.origin,
+      queryParams: {
+        access_type: 'offline',
+        prompt: 'consent',
+      },
+    },
+  })
+  if (error) throw error
+  return data
+}
+
+export const signUpMember = async (email, password, claimToken) => {
+  assertSupabase()
+
+  // Validate claim token
+  const { data: memberRow, error: memberError } = await supabase
+    .from('members')
+    .select('id, full_name, phone, photo_url, gym_id, member_code, claimed_at')
+    .eq('claim_token', claimToken)
+    .maybeSingle()
+
+  if (memberError) throw memberError
+  if (!memberRow) throw new Error('Invalid claim token. Please contact gym staff.')
+  if (memberRow.claimed_at) throw new Error('This claim token has already been used. Please contact gym staff.')
+
+  // Check if member already has auth account
+  if (memberRow.auth_user_id) {
+    throw new Error('This member already has an account. Please sign in with your existing credentials.')
+  }
+
+  // Create auth user
+  const { data: authData, error: authError } = await supabase.auth.signUp({
+    email,
+    password,
+    options: { data: { role: 'member', memberCode: memberRow.member_code } },
+  })
+
+  if (authError) throw authError
+  if (!authData.user) throw new Error('Failed to create account')
+
+  const gym = await ensureGymSetup()
+
+  // Create member profile
+  const profilePayload = {
+    id: authData.user.id,
+    gym_id: gym.id,
+    full_name: memberRow.full_name,
+    role: 'member',
+    phone: memberRow.phone,
+    avatar_url: memberRow.photo_url,
+  }
+
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .insert(profilePayload)
+    .select('*')
+    .single()
+
+  if (profileError) throw profileError
+
+  // Link auth user to member record
+  const { error: updateError } = await supabase
+    .from('members')
+    .update({
+      auth_user_id: authData.user.id,
+      claimed_at: new Date().toISOString(),
+    })
+    .eq('id', memberRow.id)
+
+  if (updateError) throw updateError
+
+  // Log audit entry
+  try {
+    await createAuditLog('member_account_created', 'members', memberRow.id, {
+      email,
+      claimToken,
+    })
+  } catch {
+    // Non-critical
+  }
+
+  return { session: authData.session, member: memberRow, profile }
+}
+
+export const validateMemberAccess = async () => {
+  if (!supabase) return null
+
+  const { data: userData, error: userError } = await supabase.auth.getUser()
+  if (userError) throw userError
+  if (!userData?.user) return null
+
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('*, members(*)')
+    .eq('id', userData.user.id)
+    .single()
+
+  if (profileError) throw profileError
+  if (!profile || profile.role !== 'member') return null
+
+  return profile
+}
+
+export const linkGoogleAccountToMember = async (claimToken) => {
+  assertSupabase()
+
+  const { data: userData } = await supabase.auth.getUser()
+  if (!userData?.user) throw new Error('No authenticated user found')
+
+  // Validate claim token
+  const { data: memberRow, error: memberError } = await supabase
+    .from('members')
+    .select('id, full_name, phone, photo_url, gym_id, member_code, claimed_at, auth_user_id')
+    .eq('claim_token', claimToken)
+    .maybeSingle()
+
+  if (memberError) throw memberError
+  if (!memberRow) throw new Error('Invalid claim token. Please contact gym staff.')
+  if (memberRow.claimed_at) throw new Error('This claim token has already been used.')
+  if (memberRow.auth_user_id) throw new Error('This member already has an account.')
+
+  const gym = await ensureGymSetup()
+
+  // Create member profile
+  const profilePayload = {
+    id: userData.user.id,
+    gym_id: gym.id,
+    full_name: memberRow.full_name,
+    role: 'member',
+    phone: memberRow.phone,
+    avatar_url: memberRow.photo_url,
+  }
+
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .insert(profilePayload)
+    .select('*')
+    .single()
+
+  if (profileError) throw profileError
+
+  // Link auth user to member record
+  const { error: updateError } = await supabase
+    .from('members')
+    .update({
+      auth_user_id: userData.user.id,
+      claimed_at: new Date().toISOString(),
+    })
+    .eq('id', memberRow.id)
+
+  if (updateError) throw updateError
+
+  // Log audit entry
+  try {
+    await createAuditLog('member_google_linked', 'members', memberRow.id, {
+      email: userData.user.email,
+      claimToken,
+    })
+  } catch {
+    // Non-critical
+  }
+
+  return { member: memberRow, profile }
 }

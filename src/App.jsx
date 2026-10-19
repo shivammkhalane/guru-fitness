@@ -1,21 +1,37 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Activity, ArrowUpRight, CalendarCheck2, CalendarDays, CircleDollarSign, Clock3, CreditCard, ScanLine, UserRoundPlus, UsersRound, WalletCards } from 'lucide-react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { Activity, ArrowUpRight, CalendarCheck2, CalendarDays, CheckCircle2, CircleDollarSign, CreditCard, LoaderCircle, ScanLine, UserRoundPlus, UsersRound, WalletCards, X, XCircle } from 'lucide-react'
 import './App.css'
 import Sidebar from './components/Sidebar'
+import Dashboard from './components/Dashboard'
+import Members from './components/Members'
+import Attendance from './components/Attendance'
+import Payments from './components/Payments'
+import Settings from './components/Settings'
 import StatsCard from './components/StatsCard'
 import Avatar from './components/Avatar'
 import ToastList from './components/ToastList'
 import AuthScreen from './components/AuthScreen'
 import CheckInView from './components/CheckInView'
 import MemberPhoto from './components/MemberPhoto'
+import MemberPortal from './components/MemberPortal'
+import GymLeaderboard from './components/GymLeaderboard'
+import PeakHoursHeatmap from './components/PeakHoursHeatmap'
+import ChurnRadar from './components/ChurnRadar'
+import FloatingAIChat from './components/FloatingAIChat'
+import ExerciseDetail from './pages/ExerciseDetail'
+import ExerciseLibrary from './pages/ExerciseLibrary'
+import useQRScanner from './hooks/useQRScanner'
 import { appConfig } from './config/appConfig'
 import { dataService } from './services/dataService'
-import { MAX_MEMBER_PHOTO_BYTES } from './services/memberPhotoService'
-import { getWhatsAppIntegrationStatus, sendWhatsAppNotification } from './services/whatsappNotificationService'
+import { isSupportedMemberPhoto, MAX_MEMBER_PHOTO_BYTES } from './services/memberPhotoService'
+import { sendWhatsAppNotification } from './services/whatsappNotificationService'
 import {
   ensureCurrentUserProfile,
   getCurrentSession,
   isSupabaseReady,
+  supabase,
+  signInWithGoogle,
   signInWithEmail,
   signUpWithEmail,
   signOut,
@@ -32,19 +48,22 @@ import {
   toDateInputValue,
 } from './utils/gymLogic'
 
-const TODAY_ISO = getTodayIsoKolkata()
+const QRCodeCard = lazy(() => import('./components/QRCodeCard'))
+
+const MEMBER_PAGE_SIZE = 24
+const PAYMENT_PAGE_SIZE = 50
 
 const navItems = [
   { key: 'dashboard', label: 'Dashboard' },
-  { key: 'scan', label: "Today's Attendance" },
+  { key: 'attendance', label: "Today's Attendance" },
   { key: 'members', label: 'Members' },
   { key: 'memberships', label: 'Memberships' },
   { key: 'payments', label: 'Payments' },
   { key: 'settings', label: 'Settings' },
+  { key: 'exercises', label: 'Exercise library' },
 ]
 
 const filterOptions = ['All', 'Active', 'Expiring Soon', 'Expired']
-const memberPhotoTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
 let toastCounter = 0
 const getNextToastId = () => {
@@ -52,16 +71,20 @@ const getNextToastId = () => {
   return `toast-${toastCounter}`
 }
 
-const selectMemberPhoto = (event, setSelection, pushToast) => {
+const selectMemberPhoto = (event, setSelection, setError, pushToast) => {
   const file = event.target.files?.[0]
   event.target.value = ''
   if (!file) return
-  if (!memberPhotoTypes.has(file.type)) {
-    pushToast('Choose a JPG, PNG, or WEBP profile photograph.', 'warning')
-    return
-  }
-  if (file.size > MAX_MEMBER_PHOTO_BYTES) {
-    pushToast('Profile photographs must be 10 MB or smaller.', 'warning')
+  if (!isSupportedMemberPhoto(file)) {
+    const message = !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
+      ? 'Choose a JPG, PNG, or WEBP profile photograph.'
+      : `Profile photographs must be ${MAX_MEMBER_PHOTO_BYTES / (1024 * 1024)} MB or smaller.`
+    setSelection((previous) => {
+      if (previous.previewUrl) URL.revokeObjectURL(previous.previewUrl)
+      return { file: null, previewUrl: '' }
+    })
+    setError(message)
+    pushToast(message, 'warning')
     return
   }
 
@@ -70,12 +93,22 @@ const selectMemberPhoto = (event, setSelection, pushToast) => {
     if (previous.previewUrl) URL.revokeObjectURL(previous.previewUrl)
     return { file, previewUrl }
   })
+  setError('')
 }
 
 const getFormattedCurrentTime = () => {
-  const now = new Date()
-  const hours = now.getHours()
-  const mins = String(now.getMinutes()).padStart(2, '0')
+  // Format in the gym's timezone so the optimistic check-in label matches the
+  // time persisted by the server regardless of the device's timezone setting.
+  const [rawHours, mins] = new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Kolkata',
+  })
+    .format(new Date())
+    .split(':')
+
+  const hours = Number(rawHours) % 24
   const ampm = hours >= 12 ? 'PM' : 'AM'
   const dispHour = hours % 12 || 12
   return `${dispHour}:${mins} ${ampm}`
@@ -108,49 +141,70 @@ const makeMemberForm = (plan = null) => {
   }
 }
 
-function App() {
+function DashboardApp() {
+  const isMemberPortalRoute = window.location.pathname.replace(/\/+$/, '') === '/member'
   const [members, setMembers] = useState(() => (isSupabaseReady ? [] : dataService.getMembers()))
   const [payments, setPayments] = useState(() => (isSupabaseReady ? [] : dataService.getPayments()))
+  const [ledgerSummary, setLedgerSummary] = useState(null)
   const [settings, setSettings] = useState(() => (isSupabaseReady ? { gymName: 'Guru Fitness Health Club', monthlyMembership: 500, phone: '+91 98765 43210', city: 'Dhule', address: 'Dhule, Maharashtra, India' } : dataService.getSettings()))
   const [membershipPlans, setMembershipPlans] = useState([])
-  const [currentView, setCurrentView] = useState('dashboard')
+  const [activeTab, setActiveTabState] = useState('dashboard')
   const [selectedMemberId, setSelectedMemberId] = useState(null)
   const [memberFilter, setMemberFilter] = useState('All')
   const [searchQuery, setSearchQuery] = useState('')
+  const [membersPage, setMembersPage] = useState(1)
+  const [paymentsPage, setPaymentsPage] = useState(1)
   const [showAddMember, setShowAddMember] = useState(false)
   const [showEditMember, setShowEditMember] = useState(false)
   const [showRenewModal, setShowRenewModal] = useState(false)
   const [renewMemberId, setRenewMemberId] = useState(null)
   const [editMemberId, setEditMemberId] = useState(null)
-  const [scannerState, setScannerState] = useState({ type: 'idle' })
   const [checkInState, setCheckInState] = useState({ type: 'idle' })
+  const [scanResult, setScanResult] = useState(null)
   const [toasts, setToasts] = useState([])
   const [memberForm, setMemberForm] = useState(makeMemberForm())
   const [editMemberForm, setEditMemberForm] = useState({ fullName: '', phone: '', photo: '' })
   const [renewalForm, setRenewalForm] = useState({
     amount: 500,
     expiryDate: getTodayIsoKolkata(),
+    planId: null,
   })
   const [session, setSession] = useState(null)
   const [authLoading, setAuthLoading] = useState(() => isSupabaseReady)
   const [dashboardClock] = useState(() => new Date())
   const [authError, setAuthError] = useState('')
   const [isLoadingLiveData, setIsLoadingLiveData] = useState(false)
+  const [liveDataError, setLiveDataError] = useState('')
+  const [liveDataRetryToken, setLiveDataRetryToken] = useState(0)
   const [isMarkingAttendance, setIsMarkingAttendance] = useState(false)
   const [isSubmittingMember, setIsSubmittingMember] = useState(false)
   const [isSavingMember, setIsSavingMember] = useState(false)
+  const [isSendingWhatsAppReminder, setIsSendingWhatsAppReminder] = useState(false)
   const [isRenewingMembership, setIsRenewingMembership] = useState(false)
   const [memberPhotoSelection, setMemberPhotoSelection] = useState({ file: null, previewUrl: '' })
   const [editPhotoSelection, setEditPhotoSelection] = useState({ file: null, previewUrl: '' })
+  const [memberPhotoError, setMemberPhotoError] = useState('')
+  const [editMemberError, setEditMemberError] = useState('')
+  const [removeEditPhoto, setRemoveEditPhoto] = useState(false)
   const [showWhatsAppActions, setShowWhatsAppActions] = useState(false)
   const [isCheckingWhatsApp, setIsCheckingWhatsApp] = useState(false)
-  const [isWhatsAppConfigured, setIsWhatsAppConfigured] = useState(false)
   const [sendingWhatsAppEvent, setSendingWhatsAppEvent] = useState('')
   const [memberProfileTab, setMemberProfileTab] = useState('Overview')
   const [memberActivityState, setMemberActivityState] = useState({ memberId: null, rows: [] })
+  const [memberAttendanceState, setMemberAttendanceState] = useState({ memberId: null, rows: [], error: '' })
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [isRecordingPayment, setIsRecordingPayment] = useState(false)
   const [paymentForm, setPaymentForm] = useState({ memberCode: '', amount: '', paymentMethod: 'cash', paymentDate: getTodayIsoKolkata(), notes: '' })
+  const qrScanSequenceRef = useRef(0)
+
+  const currentView = activeTab === 'attendance' ? 'scan' : activeTab
+  const setActiveTab = (tab) => {
+    setActiveTabState(tab === 'scan' ? 'attendance' : tab)
+    if (tab === 'scan' || tab === 'attendance') {
+      setCheckInState({ type: 'idle' })
+    }
+  }
+  const setCurrentView = setActiveTab
 
   const userRole = session?.user?.app_metadata?.role || session?.user?.role || 'owner'
 
@@ -179,16 +233,18 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!session || !isSupabaseReady) return
+    if (!session || !isSupabaseReady || isMemberPortalRoute) return
 
     const loadLiveDatabase = async () => {
       setIsLoadingLiveData(true)
+      setLiveDataError('')
       try {
-        const [sbMembers, sbPayments, sbSettings, sbPlans] = await Promise.all([
+        const [sbMembers, sbPayments, sbSettings, sbPlans, sbLedgerSummary] = await Promise.all([
           dataService.getMembersFromSupabase(),
           dataService.getPaymentsFromSupabase(),
           dataService.getSettingsFromSupabase(),
           dataService.getMembershipPlans(),
+          dataService.getLedgerSummaryFromSupabase(),
         ])
 
         if (Array.isArray(sbMembers)) {
@@ -200,6 +256,7 @@ function App() {
         if (Array.isArray(sbPayments)) {
           setPayments(sbPayments)
         }
+        setLedgerSummary(sbLedgerSummary)
         if (sbSettings) {
           setSettings(sbSettings)
         }
@@ -225,13 +282,16 @@ function App() {
         }
       } catch (err) {
         console.warn('Error loading live Supabase data:', err)
+        // Surface load failures — an empty dashboard must never be mistaken
+        // for "no data" when the real cause is a failed/permission-denied fetch.
+        setLiveDataError(err?.message || 'Unknown error while fetching live data.')
       } finally {
         setIsLoadingLiveData(false)
       }
     }
 
     loadLiveDatabase()
-  }, [session])
+  }, [session, liveDataRetryToken, isMemberPortalRoute])
 
 
   useEffect(() => {
@@ -258,6 +318,18 @@ function App() {
   const selectedPlan = membershipPlans.find((plan) => plan.id === memberForm.planId) || membershipPlans[0] || null
   const memberActivityRows = memberActivityState.memberId === selectedMember?.id ? memberActivityState.rows : []
   const isLoadingMemberActivity = memberProfileTab === 'Activity' && Boolean(selectedMember?.id) && memberActivityState.memberId !== selectedMember.id
+  const memberAttendanceRows = !isSupabaseReady
+    ? selectedMember?.attendanceHistory || []
+    : memberAttendanceState.memberId === selectedMember?.id
+      ? memberAttendanceState.rows
+      : selectedMember?.attendanceHistory || []
+  const isLoadingMemberAttendance = isSupabaseReady && memberProfileTab === 'Attendance'
+    && Boolean(selectedMember?.id)
+    && memberAttendanceState.memberId !== selectedMember.id
+  const memberPaymentRows = useMemo(
+    () => payments.filter((entry) => entry.memberCode === selectedMember?.memberId),
+    [payments, selectedMember?.memberId],
+  )
 
   const selectMember = (memberCode) => {
     setSelectedMemberId(memberCode)
@@ -277,6 +349,25 @@ function App() {
     return () => { cancelled = true }
   }, [memberProfileTab, selectedMember?.id])
 
+  useEffect(() => {
+    if (!isSupabaseReady || memberProfileTab !== 'Attendance' || !selectedMember?.id) return
+    let cancelled = false
+    dataService.getMemberAttendanceHistory(selectedMember.id)
+      .then((rows) => {
+        if (!cancelled) setMemberAttendanceState({ memberId: selectedMember.id, rows, error: '' })
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setMemberAttendanceState({
+            memberId: selectedMember.id,
+            rows: [],
+            error: error.message || 'Unable to load attendance history.',
+          })
+        }
+      })
+    return () => { cancelled = true }
+  }, [memberProfileTab, selectedMember?.id])
+
   const handleLogin = async (email, password) => {
     setAuthLoading(true)
     setAuthError('')
@@ -292,6 +383,17 @@ function App() {
     } catch (error) {
       setAuthError(error.message || 'Unable to sign in. Please check your credentials.')
     } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const handleGoogleSignIn = async () => {
+    setAuthLoading(true)
+    setAuthError('')
+    try {
+      await signInWithGoogle()
+    } catch (error) {
+      setAuthError(error.message || 'Unable to sign in with Google. Please try again.')
       setAuthLoading(false)
     }
   }
@@ -340,23 +442,32 @@ function App() {
 
   const summary = useMemo(() => computeSummary(visibleMembers), [visibleMembers])
   const todayAttendance = useMemo(() => getTodayAttendance(visibleMembers), [visibleMembers])
+  const activeMembers = useMemo(
+    () => visibleMembers.filter((member) => getMembershipStatus(member) === 'Active'),
+    [visibleMembers],
+  )
   const expiringSoon = useMemo(() => getExpiringSoonMembers(visibleMembers), [visibleMembers])
   const todayIso = getTodayIsoKolkata()
-  const todayRevenue = payments
-    .filter((payment) => payment.date === todayIso && payment.status === 'Paid')
-    .reduce((total, payment) => total + Number(payment.amount || 0), 0)
-  const weeklyRevenue = Array.from({ length: 7 }, (_, index) => {
+  const paidRevenueByDate = useMemo(() => {
+    const totals = new Map()
+    payments.forEach((payment) => {
+      if (payment.status === 'Paid') {
+        totals.set(payment.date, (totals.get(payment.date) || 0) + Number(payment.amount || 0))
+      }
+    })
+    return totals
+  }, [payments])
+  const todayRevenue = paidRevenueByDate.get(todayIso) || 0
+  const weeklyRevenue = useMemo(() => Array.from({ length: 7 }, (_, index) => {
     const date = new Date(`${todayIso}T00:00:00Z`)
     date.setUTCDate(date.getUTCDate() - (6 - index))
     const isoDate = date.toISOString().slice(0, 10)
     return {
       date: isoDate,
       label: new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', timeZone: 'UTC' }).format(date),
-      amount: payments
-        .filter((payment) => payment.date === isoDate && payment.status === 'Paid')
-        .reduce((total, payment) => total + Number(payment.amount || 0), 0),
+      amount: paidRevenueByDate.get(isoDate) || 0,
     }
-  })
+  }), [paidRevenueByDate, todayIso])
 
   const filteredMembers = useMemo(() => {
     const normalized = searchQuery.trim().toLowerCase()
@@ -375,6 +486,27 @@ function App() {
       return matchesSearch && matchesFilter
     })
   }, [memberFilter, visibleMembers, searchQuery])
+  const membersPageCount = Math.max(1, Math.ceil(filteredMembers.length / MEMBER_PAGE_SIZE))
+  const currentMembersPage = Math.min(membersPage, membersPageCount)
+  const pagedMembers = filteredMembers.slice(
+    (currentMembersPage - 1) * MEMBER_PAGE_SIZE,
+    currentMembersPage * MEMBER_PAGE_SIZE,
+  )
+
+  const paymentsPageCount = Math.max(1, Math.ceil(payments.length / PAYMENT_PAGE_SIZE))
+  const currentPaymentsPage = Math.min(paymentsPage, paymentsPageCount)
+  const pagedPayments = payments.slice(
+    (currentPaymentsPage - 1) * PAYMENT_PAGE_SIZE,
+    currentPaymentsPage * PAYMENT_PAGE_SIZE,
+  )
+
+  const membershipCounts = useMemo(() => visibleMembers.reduce((counts, member) => {
+    const status = getMembershipStatus(member)
+    if (status === 'Active') counts.active += 1
+    if (status === 'Expiring Soon') counts.expiringSoon += 1
+    if (status === 'Expired') counts.expired += 1
+    return counts
+  }, { active: 0, expiringSoon: 0, expired: 0 }), [visibleMembers])
 
   const pushToast = (message, type = 'success') => {
     const id = getNextToastId()
@@ -384,106 +516,183 @@ function App() {
     }, 2600)
   }
 
-  const handleDemoScan = (memberId) => {
+  const handleMarkAttendance = async (memberId, allowExpired = false, { navigateToCheckIn = true } = {}) => {
+    if (isMarkingAttendance) return { success: false, reason: 'Attendance is already being recorded.' }
+
     const member = members.find((entry) => entry.memberId === memberId)
-    if (!member) return
+    if (!member) return { success: false, reason: 'Member is not available in the current gym data.' }
+
+    // Resolve the current date at call time (not module load) so a tab left
+    // open past midnight still marks attendance against today's date.
+    const todayIso = getTodayIsoKolkata()
 
     const alreadyMarked = member.attendanceHistory.some(
-      (entry) => entry.date === TODAY_ISO && entry.status === 'Present',
+      (entry) => entry.date === todayIso && entry.status === 'Present',
     )
 
     if (alreadyMarked) {
-      const todayEntry = member.attendanceHistory.find((entry) => entry.date === TODAY_ISO)
-      setScannerState({ type: 'alreadyMarked', member, time: todayEntry?.time || '6:42 PM' })
-      pushToast('Already Present Today', 'warning')
-      return
-    }
-
-    if (getMembershipStatus(member) === 'Expired') {
-      setScannerState({ type: 'expired', member })
-      return
-    }
-
-    setScannerState({ type: 'found', member })
-  }
-
-  const handleMarkAttendance = async (memberId, allowExpired = false) => {
-    if (isMarkingAttendance) return
-
-    const member = members.find((entry) => entry.memberId === memberId)
-    if (!member) return
-
-    const alreadyMarked = member.attendanceHistory.some(
-      (entry) => entry.date === TODAY_ISO && entry.status === 'Present',
-    )
-
-    if (alreadyMarked) {
-      const todayEntry = member.attendanceHistory.find((entry) => entry.date === TODAY_ISO)
-      const nextState = { type: 'alreadyMarked', member, time: todayEntry?.time || '6:42 PM' }
+      const todayEntry = member.attendanceHistory.find((entry) => entry.date === todayIso)
+      const nextState = { type: 'alreadyMarked', member, time: todayEntry?.time || '—' }
       setCheckInState(nextState)
-      setScannerState(nextState)
       pushToast('Already Present Today', 'warning')
-      return
+      return { success: true, alreadyMarked: true, time: todayEntry?.time || '—' }
     }
 
     setIsMarkingAttendance(true)
     const timeValue = getFormattedCurrentTime()
+    selectMember(memberId)
+    if (navigateToCheckIn) setCurrentView('scan')
 
-    const updatedMembers = members.map((entry) => {
+    // Optimistically add the attendance entry so the UI reflects the check-in immediately.
+    const rollbackMembers = members
+    const optimisticMembers = members.map((entry) => {
       if (entry.memberId !== memberId) return entry
       return {
         ...entry,
-        attendanceHistory: [{ date: TODAY_ISO, time: timeValue, status: 'Present' }, ...entry.attendanceHistory],
+        attendanceHistory: [{ date: todayIso, time: timeValue, status: 'Present' }, ...entry.attendanceHistory],
       }
     })
-
-    setMembers(updatedMembers)
-    selectMember(memberId)
-    setCurrentView('scan')
+    setMembers(optimisticMembers)
 
     try {
       const attendanceResult = await dataService.recordAttendance(memberId, allowExpired ? 'manual_override' : 'present')
 
       if (attendanceResult?.alreadyMarked) {
+        // A duplicate was detected server-side — roll back the optimistic entry and
+        // show the original check-in time preserved in the database row.
+        setMembers(rollbackMembers)
         const originalTime = attendanceResult.originalTime || attendanceResult.time || timeValue
         const nextState = { type: 'alreadyMarked', member, time: originalTime }
         setCheckInState(nextState)
-        setScannerState(nextState)
         pushToast('Already Present Today', 'warning')
-        return
+        return { success: true, alreadyMarked: true, time: originalTime }
       }
 
       if (allowExpired) {
         const nextState = {
           type: 'successWarning',
-          member: updatedMembers.find((entry) => entry.memberId === memberId),
+          member: optimisticMembers.find((entry) => entry.memberId === memberId),
           time: attendanceResult?.time || timeValue,
           warning: 'Membership expired',
         }
         setCheckInState(nextState)
-        setScannerState(nextState)
         pushToast('Attendance marked with expired warning', 'warning')
-        return
+        return { success: true, warning: 'Membership expired' }
       }
 
       const nextState = {
         type: 'success',
-        member: updatedMembers.find((entry) => entry.memberId === memberId),
+        member: optimisticMembers.find((entry) => entry.memberId === memberId),
         time: attendanceResult?.time || timeValue,
       }
       setCheckInState(nextState)
-      setScannerState(nextState)
       pushToast('Attendance marked', 'success')
+      return { success: true, time: attendanceResult?.time || timeValue }
     } catch (err) {
+      // Roll back the optimistic attendance entry on any error.
+      setMembers(rollbackMembers)
       console.warn('Attendance DB sync warning:', err)
       const nextState = { type: 'idle' }
       setCheckInState(nextState)
-      setScannerState(nextState)
       pushToast('Unable to mark attendance', 'warning')
+      return { success: false, reason: err?.message || 'Unable to record attendance.' }
     } finally {
       setIsMarkingAttendance(false)
     }
   }
+
+  const handleQRScan = async (memberCode) => {
+    const scanId = ++qrScanSequenceRef.current
+    setScanResult({ id: scanId, status: 'loading', code: memberCode })
+
+    if (!isSupabaseReady || !session) {
+      setScanResult({ id: scanId, status: 'error', code: memberCode, reason: 'A live, authenticated gym connection is required.' })
+      return
+    }
+
+    try {
+      const member = await dataService.getMemberByQrToken(memberCode)
+      if (scanId !== qrScanSequenceRef.current) return
+      if (!member) {
+        setScanResult({ id: scanId, status: 'denied', code: memberCode, reason: 'Member record not found.' })
+        return
+      }
+
+      const membershipStatus = getMembershipStatus(member)
+      if (membershipStatus === 'Expired') {
+        setScanResult({
+          id: scanId,
+          status: 'denied',
+          member,
+          reason: `Membership expired on ${formatDate(member.expiryDate)}.`,
+        })
+        return
+      }
+
+      const attendanceResult = await handleMarkAttendance(member.memberId, false, { navigateToCheckIn: false })
+      if (scanId !== qrScanSequenceRef.current) return
+      if (!attendanceResult?.success) {
+        setScanResult({
+          id: scanId,
+          status: 'error',
+          member,
+          reason: attendanceResult?.reason || 'Attendance could not be recorded.',
+        })
+        return
+      }
+
+      setScanResult({
+        id: scanId,
+        status: 'granted',
+        member,
+        message: attendanceResult.alreadyMarked
+          ? `Already checked in today${attendanceResult.time ? ` at ${attendanceResult.time}` : ''}.`
+          : 'Attendance recorded successfully.',
+      })
+
+      if (!attendanceResult.alreadyMarked) {
+        const memberCode = member.memberCode || member.memberId
+        void (async () => {
+          let streak = null
+          try {
+            const { data, error } = await supabase.rpc('calculate_attendance_streak', {
+              p_member_id: member.id,
+            })
+            if (error) throw error
+            streak = data
+          } catch (error) {
+            console.warn('Could not calculate attendance streak:', error)
+          }
+
+          try {
+            await sendWhatsAppNotification(memberCode, 'attendance_logged', { streak })
+          } catch (error) {
+            console.warn('Could not send attendance WhatsApp notification:', error)
+          }
+        })()
+      }
+    } catch (error) {
+      if (scanId !== qrScanSequenceRef.current) return
+      setScanResult({
+        id: scanId,
+        status: 'error',
+        code: memberCode,
+        reason: error?.message || 'Could not verify this member. Please try again.',
+      })
+    }
+  }
+
+  useQRScanner(handleQRScan, {
+    enabled: Boolean(!isMemberPortalRoute && session && !authLoading && !isLoadingLiveData && currentView === 'dashboard'),
+  })
+
+  useEffect(() => {
+    if (!scanResult || scanResult.status === 'loading') return undefined
+    const timeoutId = window.setTimeout(() => {
+      setScanResult((current) => current?.id === scanResult.id ? null : current)
+    }, 4000)
+    return () => window.clearTimeout(timeoutId)
+  }, [scanResult])
 
   const openRenewalModal = (member) => {
     const plan = membershipPlans.find((item) => item.id === member.planId || item.name === member.plan)
@@ -492,6 +701,7 @@ function App() {
     setRenewalForm({
       amount: Number(plan?.price ?? member.fee),
       expiryDate: plan ? getPlanExpiryDate(plan, renewalStartDate) : member.expiryDate,
+      planId: plan?.id || null,
     })
     setShowRenewModal(true)
   }
@@ -504,6 +714,7 @@ function App() {
       await dataService.renewMembership(renewMemberId, {
         amount: renewalForm.amount,
         expiryDate: renewalForm.expiryDate,
+        planId: renewalForm.planId,
       })
 
       if (isSupabaseReady && session) {
@@ -520,16 +731,24 @@ function App() {
         }))
       }
 
-      const renewedMember = members.find((member) => member.memberId === renewMemberId)
       selectMember(renewMemberId)
       setShowRenewModal(false)
-      setScannerState({
-        type: 'renewed',
-        member: renewedMember,
-        newExpiry: renewalForm.expiryDate,
-      })
       pushToast('Membership renewed', 'success')
     } catch (err) {
+      // Refresh from the database after a failure so the UI always reflects
+      // the real persisted state (rollback or partial write).
+      if (isSupabaseReady && session) {
+        try {
+          const [nextMembers, nextPayments] = await Promise.all([
+            dataService.getMembersFromSupabase(),
+            dataService.getPaymentsFromSupabase(),
+          ])
+          setMembers(nextMembers)
+          setPayments(nextPayments)
+        } catch {
+          // Keep the current view if the refresh also fails.
+        }
+      }
       pushToast(err.message || 'Failed to renew membership.', 'warning')
     } finally {
       setIsRenewingMembership(false)
@@ -543,7 +762,6 @@ function App() {
       if (!member) {
         const nextState = { type: 'notFound', code, pendingCode: code }
         setCheckInState(nextState)
-        setScannerState(nextState)
         return
       }
 
@@ -551,56 +769,26 @@ function App() {
       if (todayEntry) {
         const nextState = { type: 'alreadyMarked', member, time: todayEntry.time || '—', code, pendingCode: code }
         setCheckInState(nextState)
-        setScannerState(nextState)
         return
       }
 
       if (getMembershipStatus(member) === 'Expired') {
         const nextState = { type: 'expired', member, code, pendingCode: code }
         setCheckInState(nextState)
-        setScannerState(nextState)
         return
       }
 
       const nextState = { type: 'ready', member, code, pendingCode: code }
       setCheckInState(nextState)
-      setScannerState(nextState)
-    } catch (error) {
+    } catch {
       const nextState = { type: 'notFound', code, pendingCode: code }
       setCheckInState(nextState)
-      setScannerState(nextState)
       pushToast('Unable to look up member', 'warning')
     }
   }
 
-  const loadMembershipPlans = async () => {
-    if (!isSupabaseReady || !session) return
-
-    try {
-      const plans = await dataService.getMembershipPlans()
-      setMembershipPlans(plans)
-
-      if (plans.length > 0) {
-        setMemberForm((prev) => {
-          const nextPlanId = prev.planId || plans[0].id
-          const nextPlan = plans.find((plan) => plan.id === nextPlanId) || plans[0]
-
-          return {
-            ...prev,
-            planId: nextPlan.id,
-            plan: nextPlan.name,
-            fee: String(prev.fee && Number(prev.fee) > 0 ? prev.fee : (Number(nextPlan.price) || 0)),
-            startDate: prev.startDate || getTodayIsoKolkata(),
-            expiryDate: prev.expiryDate || addDaysToIso(prev.startDate || getTodayIsoKolkata(), Number(nextPlan.duration_days || 30)),
-          }
-        })
-      }
-    } catch (err) {
-      pushToast(err.message || 'Unable to load membership plans.', 'warning')
-    }
-  }
-
   const openAddMember = () => {
+    setMemberPhotoError('')
     setMemberPhotoSelection((previous) => {
       if (previous.previewUrl) URL.revokeObjectURL(previous.previewUrl)
       return { file: null, previewUrl: '' }
@@ -612,12 +800,15 @@ function App() {
     event.preventDefault()
     if (isSubmittingMember) return
     if (!memberPhotoSelection.file) {
-      pushToast('Please upload a profile photograph.', 'warning')
+      const message = 'Choose a profile photograph before registering this member.'
+      setMemberPhotoError(message)
+      pushToast(message, 'warning')
       return
     }
 
     try {
       setIsSubmittingMember(true)
+      setMemberPhotoError('')
 
       const resolvedPlan = membershipPlans.find((plan) => plan.id === memberForm.planId) || selectedPlan || null
       const startDate = memberForm.startDate || getTodayIsoKolkata()
@@ -661,7 +852,9 @@ function App() {
       setCurrentView('members')
       pushToast('Member added successfully', 'success')
     } catch (err) {
-      pushToast(err.message || 'Failed to add member.', 'warning')
+      const message = err.message || 'Failed to add member.'
+      setMemberPhotoError(message)
+      pushToast(message, 'warning')
     } finally {
       setIsSubmittingMember(false)
     }
@@ -669,6 +862,8 @@ function App() {
 
   const openEditMember = (member) => {
     if (!member) return
+    setEditMemberError('')
+    setRemoveEditPhoto(false)
     setEditMemberId(member.id || member.memberId)
     setEditMemberForm({
       fullName: member.name,
@@ -685,18 +880,20 @@ function App() {
   const handleEditMember = async (event) => {
     event.preventDefault()
     if (!editMemberId || isSavingMember) return
-    if (!editPhotoSelection.file && !editMemberForm.photo) {
-      pushToast('Please upload a profile photograph.', 'warning')
-      return
-    }
 
     setIsSavingMember(true)
+    setEditMemberError('')
     try {
       const updated = await dataService.editMember(editMemberId, {
         full_name: editMemberForm.fullName,
         phone: editMemberForm.phone,
         photoFile: editPhotoSelection.file,
+        removePhoto: removeEditPhoto,
       })
+
+      if (removeEditPhoto) {
+        pushToast('Member photo removed', 'success')
+      }
 
       if (updated) {
         setMembers((prev) => prev.map((member) => (member.id === updated.id ? updated : member)))
@@ -710,10 +907,27 @@ function App() {
       })
       pushToast('Member updated successfully', 'success')
     } catch (err) {
-      pushToast(err.message || 'Failed to update member.', 'warning')
+      const message = err.message || 'Failed to update member.'
+      setEditMemberError(message)
+      pushToast(message, 'warning')
     } finally {
       setIsSavingMember(false)
     }
+  }
+
+  const normalizeIndianPhone = (phone) => {
+    if (!phone) return ''
+    const digits = phone.replace(/\D/g, '')
+    if (digits.length === 10) return `91${digits}`
+    if (digits.length === 12 && digits.startsWith('91')) return digits
+    return digits
+  }
+
+  const whatsappUrl = (phone, text) => {
+    const normalized = normalizeIndianPhone(phone)
+    if (!normalized) return '#'
+    const encodedText = encodeURIComponent(text)
+    return `https://wa.me/${normalized}?text=${encodedText}`
   }
 
   const openWhatsAppActions = async () => {
@@ -721,24 +935,72 @@ function App() {
     setIsCheckingWhatsApp(true)
     setIsWhatsAppConfigured(false)
     try {
-      const status = await getWhatsAppIntegrationStatus()
-      setIsWhatsAppConfigured(status.configured)
+      if (!selectedMember || !selectedMember.phone) {
+        setIsWhatsAppConfigured(false)
+        pushToast('Member phone number is required for WhatsApp.', 'warning')
+        return
+      }
+      setIsWhatsAppConfigured(true)
     } finally {
       setIsCheckingWhatsApp(false)
     }
   }
 
-  const handleWhatsAppNotification = async (eventType) => {
-    if (!selectedMember || !isWhatsAppConfigured || sendingWhatsAppEvent) return
+  const handleWhatsAppAction = async (eventType) => {
+    if (!selectedMember || !selectedMember.phone || sendingWhatsAppEvent) return
     setSendingWhatsAppEvent(eventType)
+
+    let message = ''
+
+    switch (eventType) {
+      case 'membership_renewal_reminder':
+        message = `Hello ${selectedMember.name || ''}, this is a reminder that your membership is expiring soon. Please renew at your earliest convenience. - Guru Fitness OS`
+        break
+      case 'payment_acknowledgement':
+        message = `Hello ${selectedMember.name || ''}, thank you for your payment of ₹${selectedMember.fee || ''}. Your membership is active. - Guru Fitness OS`
+        break
+      case 'attendance_general':
+        message = `Hello ${selectedMember.name || ''}, hello from Guru Fitness OS. How can we assist you today?`
+        break
+      case 'membership_renewed':
+        message = `Hello ${selectedMember.name || ''}, your membership has been renewed. Active until ${formatDate(selectedMember.expiryDate || '')}. - Guru Fitness OS`
+        break
+      case 'payment_receipt':
+        message = `Hello ${selectedMember.name || ''}, receipt ${selectedMember.memberId || ''} for ₹${selectedMember.fee || ''}. Thank you! - Guru Fitness OS`
+        break
+      default:
+        message = ''
+    }
+
+    const url = whatsappUrl(selectedMember.phone, message)
+    const whatsAppWindow = window.open(url, '_blank')
+    if (whatsAppWindow) {
+      pushToast(`WhatsApp opened${message ? ' with pre-filled message' : ''}`, 'info')
+    } else {
+      pushToast('Popup blocked. Please allow popups for this site.', 'warning')
+    }
+    setSendingWhatsAppEvent('')
+  }
+
+  const handleSendWhatsApp = async (member) => {
+    if (!member || isSendingWhatsAppReminder) return
+    if (!isSupabaseReady || !session) {
+      pushToast('WhatsApp reminders require an authenticated Supabase session.', 'warning')
+      return
+    }
+    if (!member.phone) {
+      pushToast('This member does not have a phone number on record.', 'warning')
+      return
+    }
+
+    setIsSendingWhatsAppReminder(true)
     try {
-      const result = await sendWhatsAppNotification(selectedMember.memberId, eventType)
-      if (result.sent) pushToast('WhatsApp message accepted by the provider', 'success')
-      else pushToast('WhatsApp message was not sent.', 'warning')
+      await sendWhatsAppNotification(member.memberId, 'membership_expiring_soon')
+      pushToast('WhatsApp reminder submitted to the provider.', 'success')
     } catch (error) {
-      pushToast(error.message || 'WhatsApp message was not sent.', 'warning')
+      pushToast(error.message || 'Could not send the WhatsApp reminder.', 'warning')
     } finally {
-      setSendingWhatsAppEvent('')
+      setIsSendingWhatsAppReminder(false)
     }
   }
 
@@ -752,11 +1014,23 @@ function App() {
     if (isRecordingPayment) return
     setIsRecordingPayment(true)
     try {
-      await dataService.recordPayment(paymentForm)
-      const nextPayments = await dataService.getPaymentsFromSupabase()
-      setPayments(nextPayments)
+      const recordedPayment = await dataService.recordPayment(paymentForm)
+      setPayments((previous) => [recordedPayment, ...previous.filter((payment) => payment.id !== recordedPayment.id)])
+      setPaymentsPage(1)
       setShowPaymentModal(false)
-      pushToast('Payment recorded successfully', 'success')
+
+      try {
+        const [nextPayments, nextLedgerSummary] = await Promise.all([
+          dataService.getPaymentsFromSupabase(),
+          dataService.getLedgerSummaryFromSupabase(),
+        ])
+        setPayments(nextPayments)
+        setLedgerSummary(nextLedgerSummary)
+        pushToast('Payment recorded and ledger balances updated.', 'success')
+      } catch (refreshError) {
+        setLiveDataError(refreshError.message || 'Payment saved, but the ledger could not be refreshed.')
+        pushToast('Payment recorded, but the ledger refresh failed. Retry the live data sync.', 'warning')
+      }
     } catch (error) {
       pushToast(error.message || 'Payment was not recorded.', 'warning')
     } finally {
@@ -804,79 +1078,85 @@ function App() {
     return <span className={`status-pill ${classNames[value] || ''}`}>{value}</span>
   }
 
-  const renderDashboard = () => {
-    const hour = Number(new Intl.DateTimeFormat('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }).format(dashboardClock))
-    const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
+  const renderDashboard = ({ onOpenAddMember, onNavigate }) => {
     const todayLabel = new Intl.DateTimeFormat('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' }).format(dashboardClock)
     const revenuePeak = Math.max(1, ...weeklyRevenue.map((day) => day.amount))
     const recentPayments = payments.slice(0, 5)
 
     return (
       <div className="page-shell dashboard-page">
-        <div className="mode-banner">
+        <div className="mode-banner dashboard-mode-banner">
           {!isSupabaseReady && <span className="demo-badge">Demo data</span>}
           {appConfig.isMockMode ? 'Development mock mode' : 'Production mode • Connected services'}
         </div>
 
         <header className="dashboard-header">
           <div>
-            <p className="eyebrow">{greeting}, Owner</p>
-            <h1>Dashboard</h1>
+            <p className="dashboard-greeting">Guru Fitness Health Club · Dhule</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Gym overview</h1>
             <p className="dashboard-date"><CalendarDays size={15} /> {todayLabel}</p>
           </div>
           <div className="dashboard-actions">
-            <button type="button" className="primary-button" onClick={openAddMember}><UserRoundPlus size={17} /> Add member</button>
-            <button type="button" className="secondary-button" onClick={() => { setCurrentView('scan'); setCheckInState({ type: 'idle' }) }}><ScanLine size={17} /> Attendance</button>
-            <button type="button" className="secondary-button" onClick={openPaymentModal}><CreditCard size={17} /> Record payment</button>
-            <button type="button" className="secondary-button" onClick={() => setCurrentView('members')}><UsersRound size={17} /> Members</button>
+            <button type="button" className="primary-button bg-[#007AFF] hover:bg-[#0062CC] text-white font-medium px-4 py-2 rounded-xl shadow-sm transition-colors active:scale-[0.98]" onClick={onOpenAddMember}><UserRoundPlus className="text-white" size={16} /> Add Member</button>
+            <button type="button" className="secondary-button" onClick={() => onNavigate('attendance')}><ScanLine className="text-gray-400" size={16} /> Record attendance</button>
+            <button type="button" className="secondary-button" onClick={openPaymentModal}><CreditCard className="text-gray-400" size={16} /> Record payment</button>
           </div>
         </header>
 
         <section className="dashboard-kpis" aria-label="Gym performance">
-          <article className="dashboard-kpi">
-            <div className="kpi-heading"><span>Total Members</span><UsersRound size={18} /></div>
-            <strong>{summary.totalMembers.toLocaleString('en-IN')}</strong>
+          <article className="dashboard-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Total Members</span><UsersRound className="text-gray-400" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{summary.totalMembers.toLocaleString('en-IN')}</strong>
             <small>Registered member records</small>
           </article>
-          <article className="dashboard-kpi">
-            <div className="kpi-heading"><span>Active Members</span><Activity size={18} /></div>
-            <strong>{summary.activeMembers.toLocaleString('en-IN')}</strong>
+          <article className="dashboard-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Active Members</span><Activity className="text-gray-400" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{summary.activeMembers.toLocaleString('en-IN')}</strong>
             <small>Membership active today</small>
           </article>
-          <article className="dashboard-kpi">
-            <div className="kpi-heading"><span>Today&apos;s Attendance</span><CalendarCheck2 size={18} /></div>
-            <strong>{summary.todayAttendanceCount.toLocaleString('en-IN')}</strong>
+          <article className="dashboard-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Today&apos;s Attendance</span><CalendarCheck2 className="text-gray-400" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{summary.todayAttendanceCount.toLocaleString('en-IN')}</strong>
             <small>Check-ins recorded today</small>
           </article>
-          <article className="dashboard-kpi revenue-kpi">
-            <div className="kpi-heading"><span>Today&apos;s Revenue</span><CircleDollarSign size={18} /></div>
-            <strong>{formatCurrency(todayRevenue)}</strong>
+          <article className="dashboard-kpi revenue-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Today&apos;s Revenue</span><CircleDollarSign className="text-gray-400" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{formatCurrency(todayRevenue)}</strong>
             <small>Payments received today</small>
           </article>
         </section>
 
         <section className="dashboard-overview-grid">
-          <article className="dashboard-panel attendance-overview">
+          <article className="dashboard-panel attendance-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Floor activity</p><h2>Recent attendance</h2></div>
-              <button type="button" className="text-action" onClick={() => setCurrentView('scan')}>Open reception <ArrowUpRight size={15} /></button>
+              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Today</p><h2 className="text-gray-900 font-semibold">Recent attendance</h2></div>
+              <button type="button" className="text-action" onClick={() => onNavigate('attendance')}>View all <ArrowUpRight size={15} /></button>
             </div>
-            {todayAttendance.length ? todayAttendance.slice(0, 6).map((person) => (
-              <div key={person.memberId} className="dashboard-list-row">
-                <MemberPhoto path={person.photo} name={person.name} size="compact" />
-                <div className="dashboard-row-main"><strong>{person.name}</strong><span>Member #{person.memberId}</span></div>
-                <span className="dashboard-row-time"><Clock3 size={14} /> {person.time}</span>
-                <span className="status-pill status-success">Present</span>
-              </div>
-            )) : <p className="dashboard-empty">No attendance recorded today.</p>}
+            <div className="dashboard-table-wrap">
+              <table className="dashboard-table attendance-table">
+                <thead><tr><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Member</th><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Member ID</th><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Check-in</th><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Status</th></tr></thead>
+                <tbody>
+                  {todayAttendance.length ? todayAttendance.slice(0, 5).map((person) => (
+                    <tr key={person.memberId}>
+                      <td><span className="dashboard-attendance-member"><Avatar name={person.name} small /><strong>{person.name}</strong></span></td>
+                      <td>#{person.memberId}</td>
+                      <td>{person.time}</td>
+                      <td><span className={`dashboard-attendance-status ${person.status === 'Override' ? 'override' : ''}`}>{person.status}</span></td>
+                    </tr>
+                  )) : (
+                    <tr><td colSpan="4"><p className="dashboard-empty">No attendance recorded today.</p></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </article>
 
-          <article className="dashboard-panel revenue-overview">
+          <article className="dashboard-panel revenue-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Collected payments</p><h2>Revenue overview</h2></div>
-              <strong className="revenue-total">{formatCurrency(weeklyRevenue.reduce((total, day) => total + day.amount, 0))}</strong>
+              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Last seven days</p><h2 className="text-gray-900 font-semibold">Revenue overview</h2></div>
+              <strong className="revenue-total text-gray-900">{formatCurrency(weeklyRevenue.reduce((total, day) => total + day.amount, 0))}</strong>
             </div>
-            <div className="revenue-chart" aria-label="Paid revenue for the last seven days">
+            <div className="revenue-chart" role="img" aria-label="Paid revenue for the last seven days">
               {weeklyRevenue.map((day) => (
                 <div className="revenue-day" key={day.date} title={`${day.label}: ${formatCurrency(day.amount)}`}>
                   <span>{day.amount ? formatCurrency(day.amount) : '—'}</span>
@@ -889,34 +1169,40 @@ function App() {
         </section>
 
         <section className="dashboard-lower-grid">
-          <article className="dashboard-panel expiring-overview">
+          <article className="dashboard-panel expiring-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Membership health</p><h2>Expiring soon</h2></div>
-              <span className="count-label">{expiringSoon.length} upcoming</span>
+              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Membership health</p><h2 className="text-gray-900 font-semibold">Expiring soon</h2></div>
+              <button type="button" className="text-action" onClick={() => { setMemberFilter('Expiring Soon'); setMembersPage(1); onNavigate('members') }}>View all <ArrowUpRight size={15} /></button>
             </div>
-            {expiringSoon.length ? expiringSoon.map((member) => (
+            {expiringSoon.length ? expiringSoon.slice(0, 3).map((member) => (
               <div className="expiring-member-row" key={member.memberId}>
-                <MemberPhoto path={member.photo} name={member.name} size="compact" />
+                <Avatar name={member.name} small />
                 <div className="dashboard-row-main"><strong>{member.name}</strong><span>#{member.memberId} · {member.plan}</span></div>
                 <div className="expiring-date"><strong>{formatDate(member.expiryDate)}</strong><span>{member.daysLeft === 0 ? 'Expires today' : `${member.daysLeft} ${member.daysLeft === 1 ? 'day' : 'days'} left`}</span></div>
-                <button type="button" className="icon-action" aria-label={`View ${member.name}`} title="View member" onClick={() => { selectMember(member.memberId); setCurrentView('members') }}><ArrowUpRight size={17} /></button>
+                <button type="button" className="icon-action" aria-label={`View ${member.name}`} title="View member" onClick={() => { selectMember(member.memberId); onNavigate('members') }}><ArrowUpRight size={17} /></button>
               </div>
             )) : <p className="dashboard-empty">No memberships are expiring soon.</p>}
           </article>
 
-          <article className="dashboard-panel payments-overview">
+          <article className="dashboard-panel payments-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Cash flow</p><h2>Recent payments</h2></div>
-              <button type="button" className="text-action" onClick={() => setCurrentView('payments')}>All payments <ArrowUpRight size={15} /></button>
+              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Cash flow</p><h2 className="text-gray-900 font-semibold">Recent payments</h2></div>
+              <button type="button" className="text-action" onClick={() => onNavigate('payments')}>View all <ArrowUpRight size={15} /></button>
             </div>
             {recentPayments.length ? recentPayments.map((payment) => (
               <div className="payment-overview-row" key={payment.id || `${payment.receiptNumber}-${payment.date}`}>
-                <div className="payment-mark"><WalletCards size={17} /></div>
-                <div className="dashboard-row-main"><strong>{payment.member}</strong><span>{payment.method} · {payment.receiptNumber || 'Receipt unavailable'}</span></div>
+                <div className="payment-mark"><WalletCards className="text-gray-400" size={17} /></div>
+                <div className="dashboard-row-main"><strong>{payment.member}</strong><span>{payment.method}</span></div>
                 <div className="payment-amount"><strong>{formatCurrency(payment.amount)}</strong><span>{formatDate(payment.date)}</span></div>
               </div>
             )) : <p className="dashboard-empty">No payments recorded yet.</p>}
           </article>
+        </section>
+
+        <section className="dashboard-analytics-grid" aria-label="Attendance analytics">
+          <GymLeaderboard members={activeMembers} />
+          <PeakHoursHeatmap attendance={todayAttendance} />
+          {['owner', 'admin'].includes(userRole) && <ChurnRadar />}
         </section>
       </div>
     )
@@ -928,92 +1214,102 @@ function App() {
       isMarkingAttendance={isMarkingAttendance}
       onCodeSubmit={handleCodeSubmit}
       onMarkAttendance={(memberId, allowExpired = false) => handleMarkAttendance(memberId, allowExpired)}
+      onScanQr={async (qrText) => {
+        if (!isSupabaseReady || !session) {
+          pushToast('Scan requires a live Supabase connection.', 'warning')
+          return
+        }
+        const member = await dataService.getMemberByQrToken(qrText)
+        if (!member) {
+          pushToast('Invalid QR Code. Member not found.', 'warning')
+          setCheckInState({ type: 'notFound', code: 'QR', pendingCode: '' })
+          setTimeout(() => {
+            setCheckInState((prev) => (prev.type === 'notFound' ? { type: 'idle' } : prev))
+          }, 3000)
+          return
+        }
+        if (getMembershipStatus(member) === 'Expired') {
+          setCheckInState({ type: 'expired', member, pendingCode: member.memberId })
+          return
+        }
+        await handleMarkAttendance(member.memberId)
+        setTimeout(() => {
+          setCheckInState((prev) => {
+            if (prev.type === 'success' || prev.type === 'alreadyMarked' || prev.type === 'successWarning') {
+              return { type: 'idle' }
+            }
+            return prev
+          })
+        }, 3000)
+      }}
+      onUsbScan={async (qrText) => {
+        if (!isSupabaseReady || !session) {
+          pushToast('Scan requires a live Supabase connection.', 'warning')
+          return
+        }
+        const member = await dataService.getMemberByQrToken(qrText)
+        if (!member) {
+          pushToast('Invalid QR Code. Member not found.', 'warning')
+          setCheckInState({ type: 'notFound', code: 'QR', pendingCode: '' })
+          setTimeout(() => {
+            setCheckInState((prev) => (prev.type === 'notFound' ? { type: 'idle' } : prev))
+          }, 3000)
+          return
+        }
+        if (getMembershipStatus(member) === 'Expired') {
+          setCheckInState({ type: 'expired', member, pendingCode: member.memberId })
+          return
+        }
+        await handleMarkAttendance(member.memberId)
+        setTimeout(() => {
+          setCheckInState((prev) => {
+            if (prev.type === 'success' || prev.type === 'alreadyMarked' || prev.type === 'successWarning') {
+              return { type: 'idle' }
+            }
+            return prev
+          })
+        }, 3000)
+      }}
       onRenew={(member) => openRenewalModal(member)}
       onAllowExpiredConfirm={(member) => {
         setCheckInState({ type: 'confirmExpiredAttendance', member, pendingCode: member.memberId })
-        setScannerState({ type: 'confirmExpiredAttendance', member, pendingCode: member.memberId })
       }}
       onNextMember={() => {
         const nextState = { type: 'idle' }
         setCheckInState(nextState)
-        setScannerState(nextState)
       }}
       onCancelExpiredConfirm={() => {
         const nextState = { type: 'idle' }
         setCheckInState(nextState)
-        setScannerState(nextState)
       }}
     />
   )
 
   const renderMembersPage = () => (
-    <div className="page-shell">
-      <header className="topbar compact-header">
-        <div>
-          <p className="eyebrow">Member directory</p>
-          <h1>Members</h1>
-        </div>
-        <button type="button" className="primary-button" onClick={openAddMember}>
-          Add Member
-        </button>
-      </header>
-
-      <div className="member-toolbar">
-        <label className="search-input">
-          <span className="search-icon">⌕</span>
-          <input
-            type="search"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            placeholder="Search by name or phone..."
-            aria-label="Search members"
-          />
-        </label>
-
-        <div className="filter-row">
-          {filterOptions.map((option) => (
-            <button
-              type="button"
-              key={option}
-              className={`filter-chip ${memberFilter === option ? 'active' : ''}`}
-              onClick={() => setMemberFilter(option)}
-            >
-              {option}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="member-list-grid">
-        {filteredMembers.length > 0 ? (
-          filteredMembers.map((member) => (
-            <div key={member.memberId} className="member-card">
-              <div className="member-card-top">
-                <MemberPhoto path={member.photo} name={member.name} size="compact" />
-                <div className="member-info-block">
-                  <h3>{member.name}</h3>
-                  <p>{member.memberId}</p>
-                </div>
-                {renderStatusBadge(getMembershipStatus(member))}
-              </div>
-              <div className="member-metadata">
-                <span>{member.phone}</span>
-                <span>{member.plan}</span>
-                <span>Expiry: {formatDate(member.expiryDate)}</span>
-              </div>
-              <button type="button" className="secondary-button full" onClick={() => selectMember(member.memberId)}>
-                View
-              </button>
-            </div>
-          ))
-        ) : (
-          <div className="panel-card empty-state">
-            <h3>No members match your current filter.</h3>
-            <p>Try another search or reset the current filter to see all members.</p>
-          </div>
-        )}
-      </div>
-
+    <Members
+      members={pagedMembers}
+      totalCount={filteredMembers.length}
+      searchQuery={searchQuery}
+      onSearchChange={(value) => {
+        setSearchQuery(value)
+        setMembersPage(1)
+      }}
+      filterOptions={filterOptions}
+      memberFilter={memberFilter}
+      onFilterChange={(value) => {
+        setMemberFilter(value)
+        setMembersPage(1)
+      }}
+      currentPage={currentMembersPage}
+      pageCount={membersPageCount}
+      pageSize={MEMBER_PAGE_SIZE}
+      onPageChange={setMembersPage}
+      onAddMember={openAddMember}
+      onSelectMember={selectMember}
+      onEditMember={openEditMember}
+      getMembershipStatus={getMembershipStatus}
+      formatDate={formatDate}
+    >
       {selectedMember && (
         <div className="profile-panel panel-card">
           <div className="profile-header">
@@ -1040,6 +1336,14 @@ function App() {
             <button type="button" className="secondary-button" onClick={() => openEditMember(selectedMember)}>
               Edit
             </button>
+            <button
+              type="button"
+              className="secondary-button whatsapp-send-button"
+              disabled={isSendingWhatsAppReminder}
+              onClick={() => handleSendWhatsApp(selectedMember)}
+            >
+              {isSendingWhatsAppReminder ? 'Sending…' : 'Send WhatsApp Reminder'}
+            </button>
             <button type="button" className="secondary-button" onClick={openWhatsAppActions}>
               WhatsApp
             </button>
@@ -1065,15 +1369,12 @@ function App() {
                 <div className="info-block"><span className="info-label">Phone</span><strong>{selectedMember.phone}</strong></div>
                 <div className="info-block"><span className="info-label">Membership</span><strong>{selectedMember.plan}</strong></div>
                 <div className="info-block"><span className="info-label">Status</span><strong>{getMembershipStatus(selectedMember)}</strong></div>
-                <div className="info-block"><span className="info-label">Today</span><strong>{selectedMember.attendanceHistory.some((entry) => entry.date === TODAY_ISO) ? 'Present Today' : 'Not marked'}</strong></div>
+                <div className="info-block"><span className="info-label">Today</span><strong>{selectedMember.attendanceHistory.some((entry) => entry.date === todayIso) ? 'Present Today' : 'Not marked'}</strong></div>
               </div>
               <div className="qr-box">
-                <div className="qr-preview" aria-label={`QR code for ${selectedMember.memberId}`}>
-                  {Array.from({ length: 169 }).map((_, index) => (
-                    <span key={index} className={`qr-cell ${index % 4 === 0 || index % 9 === 0 || (index % 11 === 0 && index % 3 === 0) ? 'filled' : ''}`} />
-                  ))}
-                </div>
-                <div className="qr-text"><strong>Member QR</strong><span>{selectedMember.memberId}</span></div>
+                <Suspense fallback={<p className="dashboard-empty" role="status">Preparing member QR…</p>}>
+                  <QRCodeCard member={selectedMember} onRegenerateToken={false} />
+                </Suspense>
               </div>
             </>
           )}
@@ -1092,10 +1393,14 @@ function App() {
             <div className="history-panel profile-tab-content">
               <h3>Attendance History</h3>
               <div className="history-list">
-                {selectedMember.attendanceHistory.slice(0, 10).map((entry, index) => (
+                {isLoadingMemberAttendance && <p className="dashboard-empty">Loading attendance…</p>}
+                {!isLoadingMemberAttendance && memberAttendanceState.error && (
+                  <p className="dashboard-empty" role="alert">{memberAttendanceState.error}</p>
+                )}
+                {!isLoadingMemberAttendance && !memberAttendanceState.error && memberAttendanceRows.slice(0, 10).map((entry, index) => (
                   <div key={`${selectedMember.memberId}-${entry.date}-${index}`} className="history-item"><span>{formatDate(entry.date)}</span><span>{entry.time}</span><span>{entry.status}</span></div>
                 ))}
-                {!selectedMember.attendanceHistory.length && <p className="dashboard-empty">No attendance has been recorded.</p>}
+                {!isLoadingMemberAttendance && !memberAttendanceState.error && !memberAttendanceRows.length && <p className="dashboard-empty">No attendance has been recorded.</p>}
               </div>
             </div>
           )}
@@ -1104,10 +1409,10 @@ function App() {
             <div className="history-panel profile-tab-content">
               <h3>Payment History</h3>
               <div className="history-list">
-                {payments.filter((entry) => entry.memberCode === selectedMember.memberId).slice(0, 10).map((entry, index) => (
+                {memberPaymentRows.slice(0, 10).map((entry, index) => (
                   <div key={`${entry.receiptNumber || entry.member}-${index}`} className="history-item"><span>{formatDate(entry.date)}</span><span>{formatCurrency(entry.amount)}</span><span>{entry.method}</span></div>
                 ))}
-                {!payments.some((entry) => entry.memberCode === selectedMember.memberId) && <p className="dashboard-empty">No payments have been recorded.</p>}
+                {!memberPaymentRows.length && <p className="dashboard-empty">No payments have been recorded.</p>}
               </div>
             </div>
           )}
@@ -1128,7 +1433,7 @@ function App() {
           )}
         </div>
       )}
-    </div>
+    </Members>
   )
 
   const renderMembershipsPage = () => (
@@ -1141,9 +1446,9 @@ function App() {
       </header>
 
       <section className="stats-grid mini-grid">
-        <StatsCard label="Active" value={visibleMembers.filter((member) => getMembershipStatus(member) === 'Active').length.toString()} accent="green" />
-        <StatsCard label="Expiring Soon" value={visibleMembers.filter((member) => getMembershipStatus(member) === 'Expiring Soon').length.toString()} accent="amber" />
-        <StatsCard label="Expired" value={visibleMembers.filter((member) => getMembershipStatus(member) === 'Expired').length.toString()} accent="red" />
+        <StatsCard label="Active" value={membershipCounts.active.toString()} accent="green" />
+        <StatsCard label="Expiring Soon" value={membershipCounts.expiringSoon.toString()} accent="amber" />
+        <StatsCard label="Expired" value={membershipCounts.expired.toString()} accent="red" />
         <StatsCard label="Monthly Plan" value={formatCurrency(settings.monthlyMembership)} accent="dark" />
       </section>
 
@@ -1192,10 +1497,25 @@ function App() {
     <div className="page-shell">
       <header className="topbar compact-header">
         <div>
-          <p className="eyebrow">Payment activity</p>
-          <h1>Payments</h1>
+          <p className="eyebrow">Financial ledger</p>
+          <h1>Payments &amp; Dues</h1>
+          <p className="dashboard-date">Collected payments and outstanding membership balances</p>
         </div>
+        <button type="button" className="primary-button" onClick={openPaymentModal}>Record Payment</button>
       </header>
+
+      <section className="ledger-summary-grid" aria-label="Financial summary">
+        <article className="ledger-summary-card">
+          <span>Total Revenue Collected</span>
+          <strong>{ledgerSummary ? formatCurrency(ledgerSummary.revenueCollected) : '—'}</strong>
+          <small>Paid receipts, net of recorded refunds</small>
+        </article>
+        <article className="ledger-summary-card dues-summary-card">
+          <span>Total Outstanding Balance Due</span>
+          <strong>{ledgerSummary ? formatCurrency(ledgerSummary.outstandingBalance) : '—'}</strong>
+          <small>Membership charges less net paid amounts</small>
+        </article>
+      </section>
 
       <div className="table-card">
         <table>
@@ -1203,6 +1523,7 @@ function App() {
             <tr>
               <th>Date</th>
               <th>Member</th>
+              <th>Receipt</th>
               <th>Amount</th>
               <th>Method</th>
               <th>Membership period</th>
@@ -1211,10 +1532,11 @@ function App() {
           </thead>
           <tbody>
             {payments.length > 0 ? (
-              payments.map((payment, index) => (
-                <tr key={`${payment.member}-${index}`}>
+              pagedPayments.map((payment, index) => (
+                <tr key={payment.id || `${payment.receiptNumber || payment.member}-${index}`}>
                   <td>{formatDate(payment.date)}</td>
                   <td>{payment.member}</td>
+                  <td>{payment.receiptNumber || '—'}</td>
                   <td>{formatCurrency(payment.amount)}</td>
                   <td>{payment.method}</td>
                   <td>{payment.period}</td>
@@ -1227,7 +1549,7 @@ function App() {
               ))
             ) : (
               <tr>
-                <td colSpan="6">
+                <td colSpan="7">
                   <div className="table-empty-state">
                     No payment records yet.
                   </div>
@@ -1237,6 +1559,20 @@ function App() {
           </tbody>
         </table>
       </div>
+      {paymentsPageCount > 1 && (
+        <nav className="list-pagination" aria-label="Payment list pages">
+          <span>{(currentPaymentsPage - 1) * PAYMENT_PAGE_SIZE + 1}–{Math.min(currentPaymentsPage * PAYMENT_PAGE_SIZE, payments.length)} of {payments.length}</span>
+          <div>
+            <button type="button" className="secondary-button compact" disabled={currentPaymentsPage === 1} onClick={() => setPaymentsPage(currentPaymentsPage - 1)}>
+              Previous
+            </button>
+            <span aria-current="page">Page {currentPaymentsPage} of {paymentsPageCount}</span>
+            <button type="button" className="secondary-button compact" disabled={currentPaymentsPage === paymentsPageCount} onClick={() => setPaymentsPage(currentPaymentsPage + 1)}>
+              Next
+            </button>
+          </div>
+        </nav>
+      )}
     </div>
   )
 
@@ -1307,19 +1643,25 @@ function App() {
   const renderPage = () => {
     switch (currentView) {
       case 'scan':
-        return renderScanPage()
+        return <Attendance>{renderScanPage()}</Attendance>
       case 'members':
         return renderMembersPage()
       case 'memberships':
         return renderMembershipsPage()
       case 'payments':
-        return renderPaymentsPage()
+        return <Payments>{renderPaymentsPage()}</Payments>
       case 'settings':
-        return renderSettingsPage()
+        return <Settings>{renderSettingsPage()}</Settings>
+      case 'exercises':
+        return <ExerciseLibrary />
       case 'dashboard':
       default:
-        return renderDashboard()
+        return renderDashboard({ onOpenAddMember: openAddMember, onNavigate: setActiveTab })
     }
+  }
+
+  if (isMemberPortalRoute) {
+    return <MemberPortal />
   }
 
   if (!session && isSupabaseReady) {
@@ -1330,6 +1672,7 @@ function App() {
         error={authError}
         onSubmit={handleLogin}
         onSignUp={handleSignUp}
+        onGoogleSignIn={handleGoogleSignIn}
         onDemoContinue={handleDemoContinue}
       />
     )
@@ -1343,6 +1686,7 @@ function App() {
         error={authError}
         onSubmit={handleLogin}
         onSignUp={handleSignUp}
+        onGoogleSignIn={handleGoogleSignIn}
         onDemoContinue={handleDemoContinue}
       />
     )
@@ -1350,9 +1694,17 @@ function App() {
 
   if (isSupabaseReady && session && isLoadingLiveData) {
     return (
-      <div className="app-shell">
-        <Sidebar navItems={visibleNavItems} currentView={currentView} onNavigate={setCurrentView} />
-        <main className="main-panel">
+      <div className="app-shell ios-light-shell flex h-screen bg-[#F5F5F7] text-[#1D1D1F] overflow-hidden">
+        <Sidebar
+          navItems={visibleNavItems}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          onOpenAddMember={openAddMember}
+          userEmail={session?.user?.email}
+          userRole={userRole}
+          onLogout={handleLogout}
+        />
+        <main className="main-panel flex-1 min-w-0">
           <div className="page-shell">
             <div className="mode-banner">
               <span className="demo-badge" style={{ opacity: 0 }}>Loading</span>
@@ -1375,23 +1727,94 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
-      <Sidebar navItems={visibleNavItems} currentView={currentView} onNavigate={setCurrentView} />
+    <div className="app-shell ios-light-shell flex h-screen bg-[#F5F5F7] text-[#1D1D1F] overflow-hidden">
+      <Sidebar
+        navItems={visibleNavItems}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      onOpenAddMember={openAddMember}
+      userEmail={session?.user?.email}
+      userRole={userRole}
+      onLogout={handleLogout}
+    />
 
-      <main className="main-panel">
-        {renderPage()}
+    <main className="main-panel flex-1 min-w-0">
+        {liveDataError && (
+          <div className="live-data-error-banner" role="alert">
+            <span className="demo-badge">Sync failed</span>
+            <span>
+              Could not load live gym data ({liveDataError}). Members, attendance, and payments shown may be empty or out of date.
+            </span>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setLiveDataRetryToken((prev) => prev + 1)}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {currentView === 'dashboard' ? (
+          <Dashboard onOpenAddMember={openAddMember} onNavigate={setActiveTab}>
+            {({ onOpenAddMember, onNavigate }) => renderDashboard({ onOpenAddMember, onNavigate })}
+          </Dashboard>
+        ) : (
+          renderPage()
+        )}
       </main>
 
-      <div className="session-toolbar">
-        <span className="session-user">{session?.user?.email || 'Demo session'}</span>
-        <button type="button" className="secondary-button compact" onClick={handleLogout}>Logout</button>
-      </div>
+      {scanResult && (
+        <div className={`kiosk-scan-backdrop kiosk-scan-${scanResult.status}`} role="presentation">
+          <section className="kiosk-scan-dialog" role="status" aria-live="assertive" aria-atomic="true">
+            <button
+              type="button"
+              className="kiosk-scan-close"
+              aria-label="Close scan result"
+              onClick={() => setScanResult(null)}
+            >
+              <X size={20} />
+            </button>
+            {scanResult.status === 'loading' ? (
+              <>
+                <LoaderCircle className="kiosk-scan-status-icon is-spinning" size={58} aria-hidden="true" />
+                <p className="kiosk-scan-kicker">Verifying membership</p>
+                <h2>Checking access…</h2>
+                <p className="kiosk-scan-detail">Please wait while we verify this member.</p>
+              </>
+            ) : scanResult.status === 'granted' ? (
+              <>
+                <CheckCircle2 className="kiosk-scan-status-icon" size={58} aria-hidden="true" />
+                <span className="kiosk-scan-badge">ACCESS GRANTED</span>
+                <h2>{scanResult.member.name}</h2>
+                <p className="kiosk-scan-member-id">Member ID · {scanResult.member.memberId}</p>
+                <p className="kiosk-scan-detail">{scanResult.message}</p>
+              </>
+            ) : (
+              <>
+                <XCircle className="kiosk-scan-status-icon" size={58} aria-hidden="true" />
+                <span className="kiosk-scan-badge">
+                  {scanResult.status === 'denied' ? 'ACCESS DENIED' : 'SCAN ERROR'}
+                </span>
+                <h2>{scanResult.member?.name || 'Unable to verify member'}</h2>
+                {scanResult.member && <p className="kiosk-scan-member-id">Member ID · {scanResult.member.memberId}</p>}
+                <p className="kiosk-scan-detail">{scanResult.reason}</p>
+              </>
+            )}
+          </section>
+        </div>
+      )}
 
       {showAddMember && (
-        <div className="modal-backdrop" onClick={() => setShowAddMember(false)}>
-          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowAddMember(false)}>
+          <div
+            className="modal-card registration-modal-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-member-title"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="modal-header">
-              <h2>Add Member</h2>
+              <h2 id="add-member-title">Add Member</h2>
               <button type="button" className="close-button" onClick={() => setShowAddMember(false)}>×</button>
             </div>
 
@@ -1501,7 +1924,11 @@ function App() {
               <div className="photo-upload-field">
                 <label>
                   <span>Profile Photograph *</span>
-                  <input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={(event) => selectMemberPhoto(event, setMemberPhotoSelection, pushToast)} />
+                  <input
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                    onChange={(event) => selectMemberPhoto(event, setMemberPhotoSelection, setMemberPhotoError, pushToast)}
+                  />
                 </label>
                 <p className="field-help">Profile photo is required. JPG, PNG, or WEBP, up to 10 MB.</p>
                 {memberPhotoSelection.previewUrl && (
@@ -1510,6 +1937,7 @@ function App() {
                     <span>{memberPhotoSelection.file?.name}</span>
                   </div>
                 )}
+                {memberPhotoError && <p className="photo-upload-error" role="alert">{memberPhotoError}</p>}
               </div>
 
               <div className="button-row right-align">
@@ -1517,7 +1945,7 @@ function App() {
                   Cancel
                 </button>
                 <button type="submit" className="primary-button" disabled={isSubmittingMember || membershipPlans.length === 0}>
-                  {isSubmittingMember ? 'Saving…' : 'Add Member'}
+                  {isSubmittingMember ? 'Saving…' : memberPhotoError ? 'Retry Save' : 'Add Member'}
                 </button>
               </div>
             </form>
@@ -1526,8 +1954,8 @@ function App() {
       )}
 
       {showEditMember && (
-        <div className="modal-backdrop" onClick={() => setShowEditMember(false)}>
-          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowEditMember(false)}>
+          <div className="modal-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <h2>Edit Member</h2>
               <button type="button" className="close-button" onClick={() => setShowEditMember(false)}>×</button>
@@ -1561,16 +1989,38 @@ function App() {
                     <img src={editPhotoSelection.previewUrl} alt="Replacement member profile" />
                     <span>{editPhotoSelection.file?.name}</span>
                   </div>
+                ) : removeEditPhoto ? (
+                  <p className="field-help">The current photograph will be removed when you save.</p>
                 ) : editMemberForm.photo ? (
                   <MemberPhoto path={editMemberForm.photo} name={editMemberForm.fullName} size="compact" />
                 ) : (
-                  <p className="photo-missing-warning">Profile photo missing. Upload a photograph to save this profile.</p>
+                  <p className="photo-missing-warning">This member has no profile photo. Choose one to add it.</p>
                 )}
                 <label>
                   <span>Replace photograph</span>
-                  <input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={(event) => selectMemberPhoto(event, setEditPhotoSelection, pushToast)} />
+                  <input
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0]
+                      selectMemberPhoto(event, setEditPhotoSelection, setEditMemberError, pushToast)
+                      if (isSupportedMemberPhoto(file)) setRemoveEditPhoto(false)
+                    }}
+                  />
                 </label>
+                {editMemberForm.photo && (
+                  <label className="remove-photo-option">
+                    <input
+                      type="checkbox"
+                      checked={removeEditPhoto}
+                      disabled={Boolean(editPhotoSelection.file)}
+                      onChange={(event) => setRemoveEditPhoto(event.target.checked)}
+                    />
+                    Remove photograph
+                  </label>
+                )}
                 <p className="field-help">Leave this unchanged to keep the current photograph.</p>
+                {editMemberError && <p className="photo-upload-error" role="alert">{editMemberError}</p>}
               </div>
 
               <div className="button-row right-align">
@@ -1578,7 +2028,7 @@ function App() {
                   Cancel
                 </button>
                 <button type="submit" className="primary-button" disabled={isSavingMember}>
-                  {isSavingMember ? 'Saving…' : 'Save Changes'}
+                  {isSavingMember ? 'Saving…' : editMemberError ? 'Retry Save' : 'Save Changes'}
                 </button>
               </div>
             </form>
@@ -1587,31 +2037,34 @@ function App() {
       )}
 
       {showWhatsAppActions && (
-        <div className="modal-backdrop" onClick={() => setShowWhatsAppActions(false)}>
-          <div className="modal-card small-card whatsapp-actions-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowWhatsAppActions(false)}>
+          <div className="modal-card small-card whatsapp-actions-modal ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <h2>WhatsApp</h2>
               <button type="button" className="close-button" onClick={() => setShowWhatsAppActions(false)}>×</button>
             </div>
             {isCheckingWhatsApp ? (
-              <p className="muted-copy">Checking server-side integration…</p>
-            ) : !isWhatsAppConfigured ? (
-              <p className="whatsapp-unconfigured">WhatsApp integration not configured</p>
+              <p className="muted-copy">Checking member phone number…</p>
+            ) : !selectedMember || !selectedMember.phone ? (
+              <p className="whatsapp-unconfigured">Member phone number is required.</p>
             ) : (
               <div className="whatsapp-action-list">
-                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppNotification('membership_expiring_soon')}>
+                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppAction('membership_renewal_reminder')}>
                   Send Renewal Reminder
                 </button>
-                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppNotification('payment_reminder')}>
-                  Send Payment Reminder
+                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppAction('payment_acknowledgement')}>
+                  Send Payment Acknowledgement
                 </button>
-                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppNotification('membership_renewed')}>
-                  Send Renewal Confirmation
+                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppAction('attendance_general')}>
+                  Attendance / General
                 </button>
-                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppNotification('payment_received')}>
-                  Send Payment Receipt
+                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppAction('membership_renewed')}>
+                  Membership Renewed
                 </button>
-                {sendingWhatsAppEvent && <p className="muted-copy">Waiting for provider confirmation…</p>}
+                <button type="button" className="secondary-button" disabled={Boolean(sendingWhatsAppEvent)} onClick={() => handleWhatsAppAction('payment_receipt')}>
+                  Payment Receipt
+                </button>
+                {sendingWhatsAppEvent && <p className="muted-copy">Opening WhatsApp…</p>}
               </div>
             )}
           </div>
@@ -1619,8 +2072,8 @@ function App() {
       )}
 
       {showPaymentModal && (
-        <div className="modal-backdrop" onClick={() => setShowPaymentModal(false)}>
-          <div className="modal-card small-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowPaymentModal(false)}>
+          <div className="modal-card small-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <h2>Record Payment</h2>
               <button type="button" className="close-button" onClick={() => setShowPaymentModal(false)}>×</button>
@@ -1663,8 +2116,8 @@ function App() {
       )}
 
       {showRenewModal && (
-        <div className="modal-backdrop" onClick={() => setShowRenewModal(false)}>
-          <div className="modal-card small-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowRenewModal(false)}>
+          <div className="modal-card small-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <h2>Renew Membership</h2>
               <button type="button" className="close-button" onClick={() => setShowRenewModal(false)}>×</button>
@@ -1673,7 +2126,7 @@ function App() {
             {renewMemberId && (
               <div className="renew-detail">
                 <p><strong>Member:</strong> {members.find((member) => member.memberId === renewMemberId)?.name}</p>
-                <p><strong>Current expiry:</strong> {formatDate(members.find((member) => member.memberId === renewMemberId)?.expiryDate || '2026-10-05')}</p>
+                <p><strong>Current expiry:</strong> {formatDate(members.find((member) => member.memberId === renewMemberId)?.expiryDate || getTodayIsoKolkata())}</p>
                 <label>
                   <span>New expiry</span>
                   <input
@@ -1705,9 +2158,22 @@ function App() {
         </div>
       )}
 
+      <FloatingAIChat
+        userName={session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || 'Athlete'}
+      />
       <ToastList toasts={toasts} />
     </div>
   )
 }
 
-export default App
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/library" element={<ExerciseLibrary />} />
+        <Route path="/exercise/:id" element={<ExerciseDetail />} />
+        <Route path="*" element={<DashboardApp />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}

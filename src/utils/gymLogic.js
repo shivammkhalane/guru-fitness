@@ -73,8 +73,6 @@ export const isPresentToday = (member) => {
 }
 
 export const getTodayAttendance = (members) => {
-  const today = getTodayIsoKolkata()
-
   return members
     .filter((member) => isPresentToday(member))
     .map((member) => {

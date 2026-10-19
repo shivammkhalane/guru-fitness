@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import MemberPhoto from './MemberPhoto'
 import {
   displayMemberCode,
@@ -9,23 +9,38 @@ import {
   parseReceptionMemberCode,
 } from '../utils/gymLogic'
 
+const CameraQRScanner = lazy(() => import('./CameraQRScanner'))
+
 export default function CheckInView({
   checkInState,
   isMarkingAttendance,
   onCodeSubmit,
   onMarkAttendance,
+  onScanQr,
+  onUsbScan,
   onRenew,
   onAllowExpiredConfirm,
   onNextMember,
   onCancelExpiredConfirm,
 }) {
   const inputRef = useRef(null)
+  const usbScannerRef = useRef(null)
+  const [cameraScannerOpen, setCameraScannerOpen] = useState(false)
 
   useEffect(() => {
-    if (checkInState.type === 'idle' || checkInState.type === 'notFound') {
-      inputRef.current?.focus()
+    if (checkInState.type === 'idle' || checkInState.type === 'notFound' || checkInState.type === 'success' || checkInState.type === 'alreadyMarked' || checkInState.type === 'renewed') {
+      usbScannerRef.current?.focus()
     }
   }, [checkInState.type])
+
+  const handleUsbScanSubmit = async (event) => {
+    event.preventDefault()
+    const token = usbScannerRef.current?.value?.trim()
+    if (token && onUsbScan) {
+      if (usbScannerRef.current) usbScannerRef.current.value = ''
+      await onUsbScan(token)
+    }
+  }
 
   const handleFormSubmit = (event) => {
     event.preventDefault()
@@ -80,9 +95,29 @@ export default function CheckInView({
 
       <div className="checkin-layout">
         <div className="checkin-input-panel panel-card">
+          <form onSubmit={handleUsbScanSubmit} className="usb-scanner-form" style={{ marginBottom: '1rem' }}>
+            <label className="checkin-code-label" htmlFor="usb-scanner-input">
+              USB QR Scanner
+            </label>
+            <input
+              id="usb-scanner-input"
+              ref={usbScannerRef}
+              type="password"
+              className="checkin-code-input"
+              placeholder="Scan QR..."
+              autoComplete="off"
+              onBlur={() => {
+                setTimeout(() => usbScannerRef.current?.focus(), 100)
+              }}
+            />
+            <p className="muted-copy">Focus here to use a USB QR scanner.</p>
+          </form>
+
+          <hr className="divider" style={{ margin: '1.5rem 0', borderColor: 'var(--border)', borderTop: '1px solid var(--border)', borderBottom: 'none' }} />
+
           <form onSubmit={handleFormSubmit}>
             <label className="checkin-code-label" htmlFor="member-code-input">
-              Member code
+              Manual Member code
             </label>
             <input
               id="member-code-input"
@@ -109,6 +144,36 @@ export default function CheckInView({
             <div className="panel-card checkin-idle-card">
               <p className="result-title">Ready for check-in</p>
               <p className="muted-copy">Type a member code to look up their profile.</p>
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={() => setCameraScannerOpen(true)}
+              >
+                Scan QR
+              </button>
+            </div>
+          )}
+
+          {cameraScannerOpen && (
+            <div className="camera-scanner-overlay" style={{ position: 'relative' }}>
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={() => setCameraScannerOpen(false)}
+                style={{ position: 'absolute', top: 10, right: 10, zIndex: 100 }}
+              >
+                Close Camera
+              </button>
+              <Suspense fallback={<p className="camera-loading" role="status">Loading camera scanner…</p>}>
+                <CameraQRScanner
+                  onScan={async (qrText) => {
+                    if (onScanQr) {
+                      await onScanQr(qrText)
+                    }
+                    setCameraScannerOpen(false)
+                  }}
+                />
+              </Suspense>
             </div>
           )}
 

@@ -1,5 +1,5 @@
 import { gymSettings, initialMembers, initialPayments } from '../data/mockData'
-import { getTodayIsoKolkata, parseReceptionMemberCode } from '../utils/gymLogic'
+import { getMembershipStatus, getTodayIsoKolkata, parseReceptionMemberCode } from '../utils/gymLogic'
 import { isSupabaseReady, supabase, ensureGymSetup, createAuditLog } from './supabaseService'
 import { removeMemberPhoto, uploadMemberPhoto } from './memberPhotoService'
 
@@ -27,17 +27,43 @@ const writeStorage = (key, value) => {
   }
 }
 
+// Gym operates in Asia/Kolkata (UTC+05:30).
+const IST_OFFSET_MINUTES = 5 * 60 + 30
+
 const formatDisplayTime = (timeValue) => {
   if (!timeValue) return '—'
 
   const value = typeof timeValue === 'string' ? timeValue : String(timeValue)
-  const cleanValue = value.includes('T') ? value.split('T')[1] : value
-  const [hours = '0', minutes = '0'] = cleanValue.split(':')
-  const hourNumber = Number(hours)
+  const timePart = value.includes('T') ? value.slice(value.indexOf('T') + 1) : value
+
+  // Already-formatted labels (e.g. "6:45 PM") pass through unchanged.
+  if (/(am|pm)/i.test(timePart)) return value
+
+  const match = timePart.match(/^(\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?(?:([+-])(\d{2}):?(\d{2}))?/)
+  if (!match) return value
+
+  // Display the time in the gym's local timezone (Asia/Kolkata). Values with an
+  // explicit UTC offset are converted from it; bare times are treated as UTC
+  // (matching how check-in times are persisted by this client).
+  let totalMinutes = Number(match[1]) * 60 + Number(match[2])
+  if (match[3]) {
+    const offsetSign = match[3] === '-' ? -1 : 1
+    totalMinutes -= offsetSign * (Number(match[4]) * 60 + Number(match[5] || 0))
+  }
+  const istMinutes = (((totalMinutes + IST_OFFSET_MINUTES) % 1440) + 1440) % 1440
+
+  const hourNumber = Math.floor(istMinutes / 60)
+  const minuteNumber = istMinutes % 60
   const suffix = hourNumber >= 12 ? 'PM' : 'AM'
   const displayHour = hourNumber % 12 || 12
-  return `${displayHour}:${String(Number(minutes)).padStart(2, '0')} ${suffix}`
+  return `${displayHour}:${String(minuteNumber).padStart(2, '0')} ${suffix}`
 }
+
+// Collision-resistant receipt number. The old `REC-${Date.now().slice(-6)}`
+// form could collide on the unique (gym_id, receipt_number) constraint and
+// fail a payment that should have succeeded.
+const generateReceiptNumber = () =>
+  `REC-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 
 const normalizeLegacyDigits = (value) => {
   const raw = String(value ?? '').trim()
@@ -148,11 +174,6 @@ const getPlanBySelection = async (gymId, payload = {}) => {
   return fallbackPlan
 }
 
-const ensureSafeMembershipStatus = (status) => {
-  const value = String(status || 'active').trim()
-  return ['active', 'expiring_soon', 'expired', 'frozen', 'cancelled', 'archived'].includes(value) ? value : 'active'
-}
-
 const collectUsedMemberCodes = (codeRows) => {
   const used = new Set()
   for (const entry of codeRows || []) {
@@ -217,10 +238,12 @@ export const memberRepository = {
     if (!isSupabaseReady || !supabase) return fallbackMemberRepository.getMembers()
 
     const [{ data: memberRows, error: memberError }, { data: membershipRows }, { data: planRows }, { data: attendanceRows }] = await Promise.all([
-      supabase.from('members').select('*').order('created_at', { ascending: false }),
-      supabase.from('memberships').select('*').order('created_at', { ascending: false }),
-      supabase.from('membership_plans').select('*'),
-      supabase.from('attendance').select('*').order('attendance_date', { ascending: false }),
+      supabase.from('members').select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at').order('created_at', { ascending: false }),
+      supabase.from('memberships').select('member_id, plan_id, amount, start_date, expiry_date, payment_method, created_at').order('created_at', { ascending: false }),
+      supabase.from('membership_plans').select('id, name, price'),
+      supabase.from('attendance').select('member_id, attendance_date, check_in_time, status')
+        .eq('attendance_date', getTodayIsoKolkata())
+        .order('attendance_date', { ascending: false }),
     ])
 
     if (memberError) throw memberError
@@ -262,6 +285,229 @@ export const memberRepository = {
     if (error) throw error
     return data || []
   },
+  async getMemberAttendanceHistory(memberId) {
+    if (!isSupabaseReady || !supabase || !memberId) return []
+    const gymData = await getActiveGym()
+    const { data, error } = await supabase
+      .from('attendance')
+      .select('attendance_date, check_in_time, status')
+      .eq('gym_id', gymData.id)
+      .eq('member_id', memberId)
+      .order('attendance_date', { ascending: false })
+      .limit(10)
+    if (error) throw error
+    return (data || []).map((entry) => ({
+      date: entry.attendance_date,
+      time: formatDisplayTime(entry.check_in_time),
+      status: 'Present',
+      rawStatus: entry.status,
+    }))
+  },
+  async getAttendanceLeaderboard(activeMembers = []) {
+    const membersById = new Map(
+      activeMembers
+        .map((member) => [member.id || member.memberId, member])
+        .filter(([memberId]) => memberId),
+    )
+    if (!membersById.size) return []
+
+    const today = getTodayIsoKolkata()
+    const yesterdayDate = new Date(`${today}T00:00:00Z`)
+    yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1)
+    const yesterday = yesterdayDate.toISOString().slice(0, 10)
+
+    let attendanceRows = []
+    if (isSupabaseReady && supabase) {
+      const gymData = await getActiveGym()
+      const cutoffDate = new Date(`${today}T00:00:00Z`)
+      cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 365)
+      const cutoff = cutoffDate.toISOString().slice(0, 10)
+      const pageSize = 1000
+
+      for (let offset = 0; ; offset += pageSize) {
+        const { data, error } = await supabase
+          .from('attendance')
+          .select('member_id, attendance_date')
+          .eq('gym_id', gymData.id)
+          .gte('attendance_date', cutoff)
+          .order('attendance_date', { ascending: false })
+          .range(offset, offset + pageSize - 1)
+
+        if (error) throw error
+        attendanceRows = attendanceRows.concat(data || [])
+        if (!data || data.length < pageSize) break
+      }
+    } else {
+      attendanceRows = [...membersById.entries()].flatMap(([memberId, member]) =>
+        (member.attendanceHistory || []).map((entry) => ({
+          member_id: memberId,
+          attendance_date: entry.date,
+        })),
+      )
+    }
+
+    const attendanceByMember = new Map()
+    for (const entry of attendanceRows) {
+      if (!membersById.has(entry.member_id) || !entry.attendance_date) continue
+      const dates = attendanceByMember.get(entry.member_id) || new Set()
+      dates.add(entry.attendance_date)
+      attendanceByMember.set(entry.member_id, dates)
+    }
+
+    const results = []
+    for (const [memberId, member] of membersById) {
+      const dates = attendanceByMember.get(memberId) || new Set()
+      let cursor = dates.has(today) ? today : yesterday
+      if (!dates.has(cursor)) continue
+
+      let streak = 0
+      while (dates.has(cursor)) {
+        streak += 1
+        const previousDate = new Date(`${cursor}T00:00:00Z`)
+        previousDate.setUTCDate(previousDate.getUTCDate() - 1)
+        cursor = previousDate.toISOString().slice(0, 10)
+      }
+      results.push({ memberId: member.memberId, name: member.name, streak })
+    }
+
+    return results.sort((left, right) =>
+      right.streak - left.streak || left.name.localeCompare(right.name),
+    )
+  },
+  async getMembersAtRiskOfChurn() {
+    if (!isSupabaseReady || !supabase) {
+      return fallbackMemberRepository.getMembers()
+        .filter((member) => member.status !== 'archived' && member.expiryDate && getMembershipStatus(member) !== 'Expired')
+        .filter((member) => {
+          const lastVisit = (member.attendanceHistory || [])
+            .map((entry) => entry.date)
+            .filter(Boolean)
+            .sort()
+            .at(-1)
+          if (!lastVisit) return true
+          const elapsed = new Date(`${getTodayIsoKolkata()}T00:00:00Z`).getTime()
+            - new Date(`${lastVisit}T00:00:00Z`).getTime()
+          return elapsed >= 7 * 24 * 60 * 60 * 1000
+        })
+        .map((member) => {
+          const lastVisit = (member.attendanceHistory || [])
+            .map((entry) => entry.date)
+            .filter(Boolean)
+            .sort()
+            .at(-1) || null
+          return {
+            id: member.id || member.memberId,
+            memberCode: member.memberId,
+            name: member.name,
+            lastVisit,
+            daysSinceLastVisit: lastVisit
+              ? Math.floor((new Date(`${getTodayIsoKolkata()}T00:00:00Z`) - new Date(`${lastVisit}T00:00:00Z`)) / (24 * 60 * 60 * 1000))
+              : null,
+          }
+        })
+    }
+
+    const gymData = await getActiveGym()
+    const [{ data: members, error: membersError }, { data: memberships, error: membershipsError }] = await Promise.all([
+      supabase
+        .from('members')
+        .select('id, member_code, full_name, status')
+        .eq('gym_id', gymData.id)
+        .neq('status', 'archived'),
+      supabase
+        .from('memberships')
+        .select('member_id, expiry_date, status, created_at')
+        .eq('gym_id', gymData.id)
+        .order('created_at', { ascending: false }),
+    ])
+    if (membersError) throw membersError
+    if (membershipsError) throw membershipsError
+
+    const today = getTodayIsoKolkata()
+    const latestMembershipByMember = new Map()
+    for (const membership of memberships || []) {
+      if (!latestMembershipByMember.has(membership.member_id)) {
+        latestMembershipByMember.set(membership.member_id, membership)
+      }
+    }
+    const activeMembers = (members || []).filter((member) => {
+      const membership = latestMembershipByMember.get(member.id)
+      return Boolean(
+        membership &&
+        membership.expiry_date >= today &&
+        !['cancelled', 'expired', 'frozen'].includes(String(membership.status || '').toLowerCase()) &&
+        !['cancelled', 'expired', 'frozen', 'archived'].includes(String(member.status || '').toLowerCase()),
+      )
+    })
+    if (!activeMembers.length) return []
+
+    const lastVisitByMember = new Map()
+    const sixDaysAgoDate = new Date(`${today}T00:00:00Z`)
+    sixDaysAgoDate.setUTCDate(sixDaysAgoDate.getUTCDate() - 6)
+    const recentCutoff = sixDaysAgoDate.toISOString().slice(0, 10)
+    const pageSize = 1000
+    const memberBatchSize = 100
+    for (let memberOffset = 0; memberOffset < activeMembers.length; memberOffset += memberBatchSize) {
+      const memberBatch = activeMembers.slice(memberOffset, memberOffset + memberBatchSize)
+      const memberIds = memberBatch.map((member) => member.id)
+      const { data: recentRows, error: recentError } = await supabase
+        .from('attendance')
+        .select('member_id, attendance_date')
+        .eq('gym_id', gymData.id)
+        .in('member_id', memberIds)
+        .gte('attendance_date', recentCutoff)
+        .lte('attendance_date', today)
+      if (recentError) throw recentError
+
+      const recentlyCheckedIn = new Set((recentRows || []).map((attendance) => attendance.member_id))
+      const candidates = memberIds.filter((memberId) => !recentlyCheckedIn.has(memberId))
+      for (let offset = 0; candidates.length && offset < candidates.length; offset += memberBatchSize) {
+        const candidateBatch = candidates.slice(offset, offset + memberBatchSize)
+        const resolved = new Set()
+        for (let rowOffset = 0; ; rowOffset += pageSize) {
+          const { data, error } = await supabase
+            .from('attendance')
+            .select('member_id, attendance_date')
+            .eq('gym_id', gymData.id)
+            .in('member_id', candidateBatch)
+            .lt('attendance_date', recentCutoff)
+            .order('attendance_date', { ascending: false })
+            .range(rowOffset, rowOffset + pageSize - 1)
+
+          if (error) throw error
+          for (const attendance of data || []) {
+            if (!resolved.has(attendance.member_id)) {
+              resolved.add(attendance.member_id)
+              lastVisitByMember.set(attendance.member_id, attendance.attendance_date)
+            }
+          }
+          if (resolved.size === candidateBatch.length || !data || data.length < pageSize) break
+        }
+      }
+    }
+
+    const todayTime = new Date(`${today}T00:00:00Z`).getTime()
+    return activeMembers
+      .map((member) => {
+        const lastVisit = lastVisitByMember.get(member.id) || null
+        const daysSinceLastVisit = lastVisit
+          ? Math.floor((todayTime - new Date(`${lastVisit}T00:00:00Z`).getTime()) / (24 * 60 * 60 * 1000))
+          : null
+        return {
+          id: member.id,
+          memberCode: member.member_code,
+          name: member.full_name,
+          lastVisit,
+          daysSinceLastVisit,
+        }
+      })
+      .filter((member) => member.daysSinceLastVisit == null || member.daysSinceLastVisit >= 7)
+      .sort((left, right) => {
+        if (left.daysSinceLastVisit == null) return right.daysSinceLastVisit == null ? left.name.localeCompare(right.name) : 1
+        if (right.daysSinceLastVisit == null) return -1
+        return right.daysSinceLastVisit - left.daysSinceLastVisit
+      })
+  },
   async getMemberByCode(codeInput) {
     const code = parseReceptionMemberCode(codeInput)
     if (!code) return null
@@ -278,7 +524,7 @@ export const memberRepository = {
 
     const { data: memberRow } = await supabase
       .from('members')
-      .select('*')
+      .select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at')
       .eq('gym_id', gymData.id)
       .eq('member_code', code)
       .maybeSingle()
@@ -286,9 +532,9 @@ export const memberRepository = {
     if (!memberRow || memberRow.status === 'archived') return null
 
     const [{ data: memberships }, { data: plans }, { data: attendanceRows }] = await Promise.all([
-      supabase.from('memberships').select('*').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('created_at', { ascending: false }),
-      supabase.from('membership_plans').select('*').eq('gym_id', gymData.id),
-      supabase.from('attendance').select('*').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('attendance_date', { ascending: false }),
+      supabase.from('memberships').select('member_id, plan_id, amount, start_date, expiry_date, payment_method, created_at').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('created_at', { ascending: false }).limit(1),
+      supabase.from('membership_plans').select('id, name, price').eq('gym_id', gymData.id),
+      supabase.from('attendance').select('member_id, attendance_date, check_in_time, status').eq('gym_id', gymData.id).eq('member_id', memberRow.id).eq('attendance_date', getTodayIsoKolkata()),
     ])
 
     const planById = new Map((plans || []).map((p) => [p.id, p]))
@@ -306,17 +552,23 @@ export const memberRepository = {
 
     const gymData = await getActiveGym()
 
-    let { data: memberRow, error: memberError } = await supabase
-      .from('members')
-      .select('*')
-      .eq('gym_id', gymData.id)
-      .eq('qr_token', cleanToken)
-      .maybeSingle()
+    let memberRow = null
+    const isUuidToken = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(cleanToken)
 
-    if (memberError || !memberRow) {
+    if (isUuidToken) {
+      const { data } = await supabase
+        .from('members')
+        .select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at')
+        .eq('gym_id', gymData.id)
+        .eq('qr_token', cleanToken)
+        .maybeSingle()
+      memberRow = data
+    }
+
+    if (!memberRow) {
       const { data: fallbackRow } = await supabase
         .from('members')
-        .select('*')
+        .select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at')
         .eq('gym_id', gymData.id)
         .eq('member_code', cleanToken)
         .maybeSingle()
@@ -328,9 +580,9 @@ export const memberRepository = {
     if (memberRow.status === 'archived') return null
 
     const [{ data: memberships }, { data: plans }, { data: attendanceRows }] = await Promise.all([
-      supabase.from('memberships').select('*').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('created_at', { ascending: false }),
-      supabase.from('membership_plans').select('*').eq('gym_id', gymData.id),
-      supabase.from('attendance').select('*').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('attendance_date', { ascending: false }),
+      supabase.from('memberships').select('member_id, plan_id, amount, start_date, expiry_date, payment_method, created_at').eq('gym_id', gymData.id).eq('member_id', memberRow.id).order('created_at', { ascending: false }).limit(1),
+      supabase.from('membership_plans').select('id, name, price').eq('gym_id', gymData.id),
+      supabase.from('attendance').select('member_id, attendance_date, check_in_time, status').eq('gym_id', gymData.id).eq('member_id', memberRow.id).eq('attendance_date', getTodayIsoKolkata()),
     ])
 
     const planById = new Map((plans || []).map((p) => [p.id, p]))
@@ -360,10 +612,10 @@ export const memberRepository = {
     const payload = { ...memberPayload }
     const fullName = String(payload.fullName || payload.name || '').trim()
     if (!fullName) throw new Error('Full name is required.')
-    if (!payload.photoFile) throw new Error('Please upload a profile photograph.')
 
     const normalizedPhone = normalizePhoneNumber(payload.phone)
     if (!normalizedPhone) throw new Error('Phone number is required.')
+    if (!payload.photoFile) throw new Error('A profile photograph is required to register a member.')
 
     if (!isSupabaseReady || !supabase) {
       throw new Error('Member registration with photographs requires a live Supabase Storage connection.')
@@ -428,26 +680,32 @@ export const memberRepository = {
     if (memberError) throw memberError
 
     let photoPath
-    try {
-      photoPath = await uploadMemberPhoto(gymData.id, memberData.id, payload.photoFile)
-      const { data: memberWithPhoto, error: photoUpdateError } = await supabase
-        .from('members')
-        .update({ photo_url: photoPath })
-        .eq('id', memberData.id)
-        .select('*')
-        .single()
-      if (photoUpdateError) throw photoUpdateError
-      memberData = memberWithPhoto
-    } catch (photoError) {
-      if (photoPath) {
-        try {
-          await removeMemberPhoto(photoPath)
-        } catch {
-          // Preserve the upload error for the form.
+    if (payload.photoFile) {
+      try {
+        photoPath = await uploadMemberPhoto(gymData.id, memberData.id, payload.photoFile)
+        const { data: memberWithPhoto, error: photoUpdateError } = await supabase
+          .from('members')
+          .update({ photo_url: photoPath })
+          .eq('id', memberData.id)
+          .select('*')
+          .single()
+        if (photoUpdateError) throw photoUpdateError
+        memberData = memberWithPhoto
+      } catch (photoError) {
+        let cleanupError = ''
+        if (photoPath) {
+          try {
+            await removeMemberPhoto(photoPath)
+          } catch (error) {
+            cleanupError = ` The uploaded object could not be removed: ${error.message || 'Storage cleanup failed.'}`
+          }
         }
+        const { error: rollbackError } = await supabase.from('members').delete().eq('id', memberData.id)
+        if (rollbackError) {
+          cleanupError += ` The incomplete member record could not be removed: ${rollbackError.message || 'Database cleanup failed.'}`
+        }
+        throw new Error(`Profile photo upload failed: ${photoError.message || 'Unable to save the photograph.'}${cleanupError}`)
       }
-      await supabase.from('members').delete().eq('id', memberData.id)
-      throw new Error(`Profile photo upload failed: ${photoError.message || 'Unable to save the photograph.'}`)
     }
 
     const paymentMethod = normalizePaymentMethod(payload.paymentMethod || payload.payment_method || 'cash')
@@ -472,10 +730,11 @@ export const memberRepository = {
 
     const shouldCreatePayment = payload.paymentMade !== false && amount > 0 && ['cash', 'upi', 'card', 'bank_transfer'].includes(paymentMethod)
     if (shouldCreatePayment) {
+      const receiptNumber = generateReceiptNumber()
       const { error: paymentError } = await supabase.from('payments').insert({
         gym_id: gymData.id,
         member_id: memberData.id,
-        receipt_number: `REC-${Date.now().toString().slice(-6)}`,
+        receipt_number: receiptNumber,
         amount,
         payment_date: startDate,
         payment_method: paymentMethod,
@@ -484,7 +743,43 @@ export const memberRepository = {
       })
 
       if (paymentError) {
-        throw new Error(`Payment creation failed: ${paymentError.message || 'Unable to record the initial payment.'}`)
+        // The payment may have committed even if the response was lost — verify
+        // by receipt before deciding to roll the registration back.
+        const { data: paymentRow } = await supabase
+          .from('payments')
+          .select('id')
+          .eq('gym_id', gymData.id)
+          .eq('receipt_number', receiptNumber)
+          .maybeSingle()
+
+        if (!paymentRow) {
+          // Roll back the whole registration (member delete cascades to its
+          // memberships) so a failed payment never leaves a member on record
+          // without a payment row.
+          if (photoPath) {
+            try {
+              await removeMemberPhoto(photoPath)
+            } catch {
+              // Best-effort cleanup; the rollback below still runs.
+            }
+          }
+
+          const { error: rollbackError } = await supabase
+            .from('members')
+            .delete()
+            .eq('id', memberData.id)
+
+          if (rollbackError) {
+            throw new Error(
+              `Payment creation failed: ${paymentError.message || 'Unable to record the initial payment.'} The registration could NOT be rolled back — verify this member's record before collecting payment again.`,
+            )
+          }
+
+          throw new Error(
+            `Payment creation failed: ${paymentError.message || 'Unable to record the initial payment.'} The registration was rolled back — no changes were saved.`,
+          )
+        }
+        // The payment did commit — the registration is complete.
       }
     }
 
@@ -540,8 +835,13 @@ export const memberRepository = {
       updated_at: new Date().toISOString(),
     }
 
+    const oldPhotoPath = memberRecord.data.photo_url || ''
+    let newPhotoPath = ''
     if (payload.photoFile) {
-      updatePayload.photo_url = await uploadMemberPhoto(gymData.id, memberRecord.data.id, payload.photoFile)
+      newPhotoPath = await uploadMemberPhoto(gymData.id, memberRecord.data.id, payload.photoFile)
+      updatePayload.photo_url = newPhotoPath
+    } else if (payload.removePhoto === true && oldPhotoPath) {
+      updatePayload.photo_url = null
     }
 
     const { data: updatedMember, error: updateError } = await supabase
@@ -551,7 +851,24 @@ export const memberRepository = {
       .select('*')
       .single()
 
-    if (updateError) throw updateError
+    if (updateError) {
+      if (newPhotoPath) {
+        try {
+          await removeMemberPhoto(newPhotoPath)
+        } catch (cleanupError) {
+          console.warn('Could not clean up the unreferenced replacement member photo:', cleanupError.message)
+        }
+      }
+      throw updateError
+    }
+
+    if ((payload.removePhoto === true || newPhotoPath) && oldPhotoPath && oldPhotoPath !== newPhotoPath) {
+      try {
+        await removeMemberPhoto(oldPhotoPath)
+      } catch (cleanupError) {
+        console.warn('Member photo was updated, but the previous storage object could not be removed:', cleanupError.message)
+      }
+    }
 
     try {
       await createAuditLog('member_updated', 'members', updatedMember.id, {
@@ -728,7 +1045,7 @@ export const memberRepository = {
       alreadyMarked: false,
     }
   },
-  async renewMembership(memberId, { amount, expiryDate, paymentMethod = 'Cash' }) {
+  async renewMembership(memberId, { amount, expiryDate, paymentMethod = 'Cash', planId = null }) {
     if (!isSupabaseReady || !supabase) return
 
     const { data: gymData, error: gymError } = await supabase
@@ -750,34 +1067,72 @@ export const memberRepository = {
     if (memberError) throw memberError
     if (!memberRow) throw new Error('Member not found for membership renewal.')
 
+    const renewalPlanId = planId || memberRow.plan_id
+    if (!renewalPlanId) {
+      throw new Error('Membership renewal failed: no membership plan is linked to this member.')
+    }
+
     const todayIso = getTodayIsoKolkata()
     const paymentMethodClean = (paymentMethod || 'cash').toLowerCase().replace(/\s+/g, '_')
     const validPaymentMethods = ['cash', 'upi', 'card', 'bank_transfer']
     const safePaymentMethod = validPaymentMethods.includes(paymentMethodClean) ? paymentMethodClean : 'cash'
+    const receiptNumber = generateReceiptNumber()
 
-    const { error: membershipError } = await supabase.from('memberships').insert({
-      gym_id: gymData.id,
-      member_id: memberRow.id,
-      plan_id: memberRow.plan_id,
-      start_date: todayIso,
-      expiry_date: expiryDate,
-      amount: Number(amount || 500),
-      payment_method: safePaymentMethod,
-      status: 'active',
-    })
+    const { data: membershipData, error: membershipError } = await supabase
+      .from('memberships')
+      .insert({
+        gym_id: gymData.id,
+        member_id: memberRow.id,
+        plan_id: renewalPlanId,
+        start_date: todayIso,
+        expiry_date: expiryDate,
+        amount: Number(amount || 500),
+        payment_method: safePaymentMethod,
+        status: 'active',
+      })
+      .select('id')
+      .single()
     if (membershipError) throw new Error(`Membership renewal failed: ${membershipError.message || 'Unknown error'}`)
 
     const { error: paymentError } = await supabase.from('payments').insert({
       gym_id: gymData.id,
       member_id: memberRow.id,
-      receipt_number: `REC-${Date.now().toString().slice(-6)}`,
+      receipt_number: receiptNumber,
       amount: Number(amount || 500),
       payment_date: todayIso,
       payment_method: safePaymentMethod,
       status: 'paid',
       notes: 'Membership Renewal',
     })
-    if (paymentError) throw new Error(`Renewal payment failed: ${paymentError.message || 'Unknown error'}`)
+
+    if (paymentError) {
+      // The payment may have committed even if the response was lost — verify
+      // by receipt before deciding to roll the renewal back.
+      const { data: paymentRow } = await supabase
+        .from('payments')
+        .select('id')
+        .eq('gym_id', gymData.id)
+        .eq('receipt_number', receiptNumber)
+        .maybeSingle()
+
+      if (!paymentRow) {
+        const { error: rollbackError } = await supabase
+          .from('memberships')
+          .delete()
+          .eq('id', membershipData.id)
+
+        if (rollbackError) {
+          throw new Error(
+            `Renewal payment failed: ${paymentError.message || 'Unknown error'}. The renewal could NOT be rolled back — verify the member's expiry date before collecting payment again.`,
+          )
+        }
+
+        throw new Error(
+          `Renewal payment failed: ${paymentError.message || 'Unknown error'}. The renewal was rolled back — no changes were saved.`,
+        )
+      }
+      // The payment did commit — the renewal is complete.
+    }
 
     try {
       await createAuditLog('membership_renewed', 'memberships', memberRow.id, { expiryDate, amount })
@@ -806,7 +1161,7 @@ export const paymentRepository = {
     if (!member) throw new Error('Member not found for this payment.')
 
     const paymentMethod = normalizePaymentMethod(payload.paymentMethod)
-    const receiptNumber = `REC-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    const receiptNumber = generateReceiptNumber()
     const paymentDate = payload.paymentDate || getTodayIsoKolkata()
     const { data: payment, error: paymentError } = await supabase
       .from('payments')
@@ -849,12 +1204,22 @@ export const paymentRepository = {
   async getPaymentsFromSupabase() {
     if (!isSupabaseReady || !supabase) return fallbackPaymentRepository.getPayments()
 
-    const [{ data: paymentRows, error: payErr }, { data: memberRows }] = await Promise.all([
-      supabase.from('payments').select('*').order('created_at', { ascending: false }),
-      supabase.from('members').select('id, full_name, member_code'),
+    const gymData = await getActiveGym()
+    const [
+      { data: paymentRows, error: payErr },
+      { data: memberRows, error: memberErr },
+    ] = await Promise.all([
+      supabase.from('payments')
+        .select('id, member_id, receipt_number, amount, payment_date, payment_method, notes, status, created_at')
+        .eq('gym_id', gymData.id)
+        .order('created_at', { ascending: false }),
+      supabase.from('members')
+        .select('id, full_name, member_code')
+        .eq('gym_id', gymData.id),
     ])
 
     if (payErr) throw payErr
+    if (memberErr) throw memberErr
     if (!paymentRows || paymentRows.length === 0) return []
 
     const memberMap = new Map((memberRows || []).map((m) => [m.id, m]))
@@ -874,6 +1239,59 @@ export const paymentRepository = {
       }
     })
   },
+  async getLedgerSummaryFromSupabase() {
+    if (!isSupabaseReady || !supabase) return null
+
+    const gymData = await getActiveGym()
+    const [
+      { data: membershipRows, error: membershipError },
+      { data: paymentRows, error: paymentError },
+    ] = await Promise.all([
+      supabase
+        .from('memberships')
+        .select('member_id, amount, status')
+        .eq('gym_id', gymData.id),
+      supabase
+        .from('payments')
+        .select('member_id, amount, status')
+        .eq('gym_id', gymData.id),
+    ])
+
+    if (membershipError) throw membershipError
+    if (paymentError) throw paymentError
+
+    const chargesByMember = new Map()
+    for (const membership of membershipRows || []) {
+      if (membership.status === 'cancelled') continue
+      const amount = Number(membership.amount)
+      if (!Number.isFinite(amount) || amount < 0) continue
+      chargesByMember.set(
+        membership.member_id,
+        (chargesByMember.get(membership.member_id) || 0) + amount,
+      )
+    }
+
+    const paymentsByMember = new Map()
+    let revenueCollected = 0
+    for (const payment of paymentRows || []) {
+      const amount = Number(payment.amount)
+      if (!Number.isFinite(amount) || amount < 0) continue
+      if (payment.status === 'paid') {
+        revenueCollected += amount
+        paymentsByMember.set(payment.member_id, (paymentsByMember.get(payment.member_id) || 0) + amount)
+      } else if (payment.status === 'refunded') {
+        revenueCollected -= amount
+        paymentsByMember.set(payment.member_id, (paymentsByMember.get(payment.member_id) || 0) - amount)
+      }
+    }
+
+    let outstandingBalance = 0
+    for (const [memberId, charges] of chargesByMember) {
+      outstandingBalance += Math.max(0, charges - (paymentsByMember.get(memberId) || 0))
+    }
+
+    return { revenueCollected, outstandingBalance }
+  },
 }
 
 export const settingsRepository = {
@@ -881,7 +1299,7 @@ export const settingsRepository = {
   async getSettingsFromSupabase() {
     if (!isSupabaseReady || !supabase) return fallbackSettingsRepository.getSettings()
 
-    const { data, error } = await supabase.from('gyms').select('*').eq('slug', 'guru-fitness-health-club').maybeSingle()
+    const { data, error } = await supabase.from('gyms').select('name, city, state').eq('slug', 'guru-fitness-health-club').maybeSingle()
     if (error && error.code !== 'PGRST116') throw error
     if (!data) return fallbackSettingsRepository.getSettings()
 
@@ -926,6 +1344,9 @@ export const gymRepository = {
   getMembershipPlans: memberRepository.getMembershipPlans,
   getMembersFromSupabase: memberRepository.getMembersFromSupabase,
   getMemberActivity: memberRepository.getMemberActivity,
+  getMemberAttendanceHistory: memberRepository.getMemberAttendanceHistory,
+  getAttendanceLeaderboard: memberRepository.getAttendanceLeaderboard,
+  getMembersAtRiskOfChurn: memberRepository.getMembersAtRiskOfChurn,
   getMemberByCode: memberRepository.getMemberByCode,
   getMemberByQrToken: memberRepository.getMemberByQrToken,
   regenerateMemberQrToken: memberRepository.regenerateMemberQrToken,
@@ -936,10 +1357,9 @@ export const gymRepository = {
   renewMembership: memberRepository.renewMembership,
   recordPayment: paymentRepository.recordPayment,
   getPaymentsFromSupabase: paymentRepository.getPaymentsFromSupabase,
+  getLedgerSummaryFromSupabase: paymentRepository.getLedgerSummaryFromSupabase,
   getSettingsFromSupabase: settingsRepository.getSettingsFromSupabase,
   saveSettingsToSupabase: settingsRepository.saveSettingsToSupabase,
 }
 
 export const dataService = gymRepository
-
-

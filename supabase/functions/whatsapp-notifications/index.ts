@@ -12,6 +12,7 @@ const events = {
   membership_renewed: { templateKey: 'membership_renewed', approvedTemplateEnv: 'WHATSAPP_TEMPLATE_MEMBERSHIP_RENEWED' },
   payment_received: { templateKey: 'payment_received', approvedTemplateEnv: 'WHATSAPP_TEMPLATE_PAYMENT_RECEIVED' },
   payment_reminder: { templateKey: 'payment_reminder', approvedTemplateEnv: 'WHATSAPP_TEMPLATE_PAYMENT_REMINDER' },
+  attendance_logged: { templateKey: 'attendance_logged', approvedTemplateEnv: 'WHATSAPP_TEMPLATE_ATTENDANCE_LOGGED' },
 } as const
 
 type EventType = keyof typeof events
@@ -102,7 +103,7 @@ Deno.serve(async (request) => {
     ))
     const configured = Boolean(providerToken && phoneNumberId && graphVersion && allTemplatesConfigured)
 
-    const { action, memberCode, eventType } = await request.json()
+    const { action, memberCode, eventType, streak } = await request.json()
     if (action === 'status') return jsonResponse({ configured })
     if (action !== 'send' || typeof memberCode !== 'string' || !(eventType in events)) {
       return jsonResponse({ message: 'A valid member code and notification event are required.' }, 400)
@@ -150,6 +151,7 @@ Deno.serve(async (request) => {
       payment_date: formatDate(payment?.payment_date || null, timezone),
       receipt_number: payment?.receipt_number || '',
       gym_name: gym.name,
+      attendance_streak: streak == null ? '' : String(streak),
     }
     const renderedBody = renderTemplate(template.body, values)
     const parameters = [...template.body.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)].map(([, key]) => ({
@@ -164,7 +166,11 @@ Deno.serve(async (request) => {
       channel: 'whatsapp',
       template: spec.templateKey,
       status: 'queued',
-      payload: { event_type: eventType, member_code: member.member_code },
+      payload: {
+        event_type: eventType,
+        member_code: member.member_code,
+        ...(eventType === 'attendance_logged' ? { streak: streak ?? null } : {}),
+      },
     }).select('id').single()
     if (notificationInsert.error) throw notificationInsert.error
 
