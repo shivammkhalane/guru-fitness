@@ -12,12 +12,12 @@ import {
 const CameraQRScanner = lazy(() => import('./CameraQRScanner'))
 
 export default function CheckInView({
+  members,
+  todayAttendance,
   checkInState,
   isMarkingAttendance,
-  onCodeSubmit,
   onMarkAttendance,
   onScanQr,
-  onUsbScan,
   onRenew,
   onAllowExpiredConfirm,
   onNextMember,
@@ -26,6 +26,8 @@ export default function CheckInView({
   const inputRef = useRef(null)
   const usbScannerRef = useRef(null)
   const [cameraScannerOpen, setCameraScannerOpen] = useState(false)
+  const [manualMember, setManualMember] = useState(null)
+  const [lookupError, setLookupError] = useState('')
 
   useEffect(() => {
     if (checkInState.type === 'idle' || checkInState.type === 'notFound' || checkInState.type === 'success' || checkInState.type === 'alreadyMarked' || checkInState.type === 'renewed') {
@@ -36,16 +38,20 @@ export default function CheckInView({
   const handleUsbScanSubmit = async (event) => {
     event.preventDefault()
     const token = usbScannerRef.current?.value?.trim()
-    if (token && onUsbScan) {
+    if (token && onScanQr) {
       if (usbScannerRef.current) usbScannerRef.current.value = ''
-      await onUsbScan(token)
+      setManualMember(null)
+      setLookupError('')
+      await onScanQr(token)
     }
   }
 
   const handleFormSubmit = (event) => {
     event.preventDefault()
     const code = parseReceptionMemberCode(inputRef.current?.value)
-    if (code) onCodeSubmit(code)
+    const member = code && members.find((entry) => displayMemberCode(entry) === code)
+    setManualMember(member || null)
+    setLookupError(member ? '' : `No member with code ${code || inputRef.current?.value || ''}`)
   }
 
   const handleMarkKeyDown = (event, memberId, allowExpired = false) => {
@@ -55,11 +61,18 @@ export default function CheckInView({
     }
   }
 
+  const handleNextMember = () => {
+    setManualMember(null)
+    setLookupError('')
+    onNextMember()
+  }
+
   const renderMemberCard = (member) => {
     const code = displayMemberCode(member)
     const status = getMembershipStatus(member)
-    const todayEntry = getMemberTodayAttendance(member)
-    const present = isPresentToday(member)
+    const todayEntry = todayAttendance.find((entry) => String(entry.memberId) === String(member.memberId))
+      || getMemberTodayAttendance(member)
+    const present = Boolean(todayEntry) || isPresentToday(member)
 
     return (
       <div className="checkin-member-card panel-card">
@@ -130,8 +143,10 @@ export default function CheckInView({
               autoComplete="off"
               defaultValue={checkInState.pendingCode || ''}
               onChange={() => {
+                setManualMember(null)
+                setLookupError('')
                 if (checkInState.type === 'notFound') {
-                  onNextMember()
+                  handleNextMember()
                 }
               }}
             />
@@ -179,22 +194,43 @@ export default function CheckInView({
 
           {checkInState.type === 'notFound' && (
             <div className="panel-card checkin-error-card">
-              <p className="result-title danger-title">No member with code {checkInState.code}</p>
+              <p className="result-title danger-title">{checkInState.code ? `No member with code ${checkInState.code}` : 'Member not found'}</p>
               <p className="muted-copy">Check the code and try again.</p>
             </div>
           )}
 
-          {checkInState.type === 'ready' && checkInState.member && (
+          {lookupError && checkInState.type === 'idle' && (
+            <div className="panel-card checkin-error-card">
+              <p className="result-title danger-title">{lookupError}</p>
+              <p className="muted-copy">Check the code and try again.</p>
+            </div>
+          )}
+
+          {manualMember && checkInState.type === 'idle' && getMembershipStatus(manualMember) !== 'Expired' && (
             <>
-              {renderMemberCard(checkInState.member)}
+              {renderMemberCard(manualMember)}
               <button
                 type="button"
                 className="primary-button block checkin-mark-btn"
                 disabled={isMarkingAttendance}
-                onClick={() => onMarkAttendance(checkInState.member.memberId)}
-                onKeyDown={(event) => handleMarkKeyDown(event, checkInState.member.memberId)}
+                onClick={() => onMarkAttendance(manualMember.memberId)}
+                onKeyDown={(event) => handleMarkKeyDown(event, manualMember.memberId)}
               >
                 {isMarkingAttendance ? 'Saving…' : 'Mark Attendance'}
+              </button>
+            </>
+          )}
+
+          {manualMember && checkInState.type === 'idle' && getMembershipStatus(manualMember) === 'Expired' && (
+            <>
+              {renderMemberCard(manualMember)}
+              <p className="result-title danger-title">Membership Expired</p>
+              <p className="expired-copy">Expired on {formatDate(manualMember.expiryDate)}</p>
+              <button type="button" className="primary-button block" onClick={() => onRenew(manualMember)}>
+                Renew Membership
+              </button>
+              <button type="button" className="secondary-button block" onClick={() => onAllowExpiredConfirm(manualMember)}>
+                Allow Attendance Anyway
               </button>
             </>
           )}
@@ -204,7 +240,7 @@ export default function CheckInView({
               {renderMemberCard(checkInState.member)}
               <p className="result-title success-title">Already Present Today</p>
               <p className="attendance-time">Original check-in: {checkInState.time}</p>
-              <button type="button" className="secondary-button block" onClick={onNextMember}>
+              <button type="button" className="secondary-button block" onClick={handleNextMember}>
                 Next member
               </button>
             </>
@@ -253,7 +289,7 @@ export default function CheckInView({
               {renderMemberCard(checkInState.member)}
               <p className="result-title success-title">Present Today</p>
               <p className="attendance-time">{checkInState.time}</p>
-              <button type="button" className="secondary-button block" onClick={onNextMember}>
+              <button type="button" className="secondary-button block" onClick={handleNextMember}>
                 Next member
               </button>
             </>
@@ -265,7 +301,7 @@ export default function CheckInView({
               <p className="result-title success-title">Present Today (owner override)</p>
               <p className="attendance-time">{checkInState.time}</p>
               <p className="warning-copy">Membership was expired when checked in.</p>
-              <button type="button" className="secondary-button block" onClick={onNextMember}>
+              <button type="button" className="secondary-button block" onClick={handleNextMember}>
                 Next member
               </button>
             </>
@@ -276,7 +312,7 @@ export default function CheckInView({
               {renderMemberCard(checkInState.member)}
               <p className="result-title success-title">Membership Renewed</p>
               <p className="muted-copy">Active until {formatDate(checkInState.newExpiry)}.</p>
-              <button type="button" className="secondary-button block" onClick={onNextMember}>
+              <button type="button" className="secondary-button block" onClick={handleNextMember}>
                 Next member
               </button>
             </>

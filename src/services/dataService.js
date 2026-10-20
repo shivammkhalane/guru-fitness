@@ -98,7 +98,8 @@ const normalizeSupabaseMember = (memberRow, membershipRow, planRow, attendanceRo
     id: memberRow.id,
     memberId: memberCode,
     memberCode,
-    qrToken: memberRow.qr_token || memberRow.id,
+    qrToken: memberRow.qr_token || '',
+    whatsappPassConsent: memberRow.whatsapp_pass_consent === true,
     name: memberRow.full_name,
     phone: memberRow.phone,
     plan: planRow?.name || membershipRow?.plan_name || 'Monthly',
@@ -119,12 +120,13 @@ const normalizeSupabaseMember = (memberRow, membershipRow, planRow, attendanceRo
 }
 
 const getActiveGym = async () => {
-  const { data: gymData } = await supabase
+  const { data: gymData, error } = await supabase
     .from('gyms')
     .select('id, slug, name, city, state, country, currency, timezone')
     .eq('slug', 'guru-fitness-health-club')
     .maybeSingle()
 
+  if (error) throw error
   if (gymData) return gymData
   return ensureGymSetup()
 }
@@ -237,8 +239,8 @@ export const memberRepository = {
   async getMembersFromSupabase() {
     if (!isSupabaseReady || !supabase) return fallbackMemberRepository.getMembers()
 
-    const [{ data: memberRows, error: memberError }, { data: membershipRows }, { data: planRows }, { data: attendanceRows }] = await Promise.all([
-      supabase.from('members').select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at').order('created_at', { ascending: false }),
+    const [membersResult, membershipsResult, plansResult, attendanceResult] = await Promise.all([
+      supabase.from('members').select('id, member_code, qr_token, whatsapp_pass_consent, full_name, phone, photo_url, plan_id, status, created_at').order('created_at', { ascending: false }),
       supabase.from('memberships').select('member_id, plan_id, amount, start_date, expiry_date, payment_method, created_at').order('created_at', { ascending: false }),
       supabase.from('membership_plans').select('id, name, price'),
       supabase.from('attendance').select('member_id, attendance_date, check_in_time, status')
@@ -246,7 +248,15 @@ export const memberRepository = {
         .order('attendance_date', { ascending: false }),
     ])
 
-    if (memberError) throw memberError
+    if (membersResult.error) throw membersResult.error
+    if (membershipsResult.error) throw membershipsResult.error
+    if (plansResult.error) throw plansResult.error
+    if (attendanceResult.error) throw attendanceResult.error
+
+    const memberRows = membersResult.data
+    const membershipRows = membershipsResult.data
+    const planRows = plansResult.data
+    const attendanceRows = attendanceResult.data
 
     const membershipByMember = new Map()
     for (const item of membershipRows || []) {
@@ -524,7 +534,7 @@ export const memberRepository = {
 
     const { data: memberRow } = await supabase
       .from('members')
-      .select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at')
+      .select('id, member_code, qr_token, whatsapp_pass_consent, full_name, phone, photo_url, plan_id, status, created_at')
       .eq('gym_id', gymData.id)
       .eq('member_code', code)
       .maybeSingle()
@@ -553,26 +563,40 @@ export const memberRepository = {
     const gymData = await getActiveGym()
 
     let memberRow = null
+    const memberIdQrMatch = cleanToken.match(/^GURU-MBR-([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/i)
     const isUuidToken = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(cleanToken)
 
-    if (isUuidToken) {
-      const { data } = await supabase
+    if (memberIdQrMatch) {
+      const { data, error } = await supabase
         .from('members')
-        .select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at')
+        .select('id, member_code, qr_token, whatsapp_pass_consent, full_name, phone, photo_url, plan_id, status, created_at')
+        .eq('gym_id', gymData.id)
+        .eq('id', memberIdQrMatch[1])
+        .maybeSingle()
+      if (error) throw error
+      memberRow = data
+    }
+
+    if (!memberRow && isUuidToken) {
+      const { data, error } = await supabase
+        .from('members')
+        .select('id, member_code, qr_token, whatsapp_pass_consent, full_name, phone, photo_url, plan_id, status, created_at')
         .eq('gym_id', gymData.id)
         .eq('qr_token', cleanToken)
         .maybeSingle()
+      if (error) throw error
       memberRow = data
     }
 
     if (!memberRow) {
-      const { data: fallbackRow } = await supabase
+      const { data: fallbackRow, error } = await supabase
         .from('members')
-        .select('id, member_code, qr_token, full_name, phone, photo_url, plan_id, status, created_at')
+        .select('id, member_code, qr_token, whatsapp_pass_consent, full_name, phone, photo_url, plan_id, status, created_at')
         .eq('gym_id', gymData.id)
         .eq('member_code', cleanToken)
         .maybeSingle()
 
+      if (error) throw error
       if (!fallbackRow) return null
       memberRow = fallbackRow
     }
@@ -666,6 +690,7 @@ export const memberRepository = {
       member_code: generatedMemberCode,
       full_name: fullName,
       phone: normalizedPhone,
+      whatsapp_pass_consent: payload.whatsappPassConsent === true,
       photo_url: null,
       plan_id: selectedPlan.id,
       status: 'active',
@@ -832,6 +857,7 @@ export const memberRepository = {
     const updatePayload = {
       full_name: nextFullName,
       phone: nextPhone,
+      whatsapp_pass_consent: payload.whatsappPassConsent === true,
       updated_at: new Date().toISOString(),
     }
 
@@ -1301,14 +1327,14 @@ export const settingsRepository = {
 
     const { data, error } = await supabase.from('gyms').select('name, city, state').eq('slug', 'guru-fitness-health-club').maybeSingle()
     if (error && error.code !== 'PGRST116') throw error
-    if (!data) return fallbackSettingsRepository.getSettings()
+    if (!data) return { gymName: '', monthlyMembership: 0, phone: '', city: '', address: '' }
 
     return {
-      gymName: data.name || 'Guru Fitness Health Club',
-      monthlyMembership: 500,
-      phone: '+91 98765 43210',
-      city: data.city || 'Dhule',
-      address: `${data.city || 'Dhule'}, ${data.state || 'Maharashtra'}, India`,
+      gymName: data.name || '',
+      monthlyMembership: 0,
+      phone: '',
+      city: data.city || '',
+      address: '',
     }
   },
   async saveSettingsToSupabase(settingsPayload) {
@@ -1329,8 +1355,8 @@ export const settingsRepository = {
       .maybeSingle()
 
     if (error) throw error
-    fallbackSettingsRepository.saveSettings(settingsPayload)
-    return data || settingsPayload
+    if (!data) throw new Error('Settings were not saved because no matching gym record exists.')
+    return data
   },
 }
 

@@ -1,4 +1,5 @@
-import { BookOpen, CalendarCheck2, CreditCard, LayoutDashboard, LogOut, Settings2, UserRoundPlus, UsersRound, WalletCards } from 'lucide-react'
+import { BookOpen, CalendarCheck2, CreditCard, LayoutDashboard, LogOut, Menu, Settings2, UserRoundPlus, UsersRound, WalletCards, X } from 'lucide-react'
+import ThemeToggle from './ThemeToggle'
 
 const navIcons = {
   dashboard: LayoutDashboard,
@@ -35,6 +36,8 @@ export default function Sidebar({
   userEmail,
   userRole,
   onLogout,
+  mobileNavOpen = false,
+  onToggleMobileNav,
 }) {
   const selectedTab = activeTab ?? currentView
   const navigate = setActiveTab ?? onNavigate
@@ -45,16 +48,28 @@ export default function Sidebar({
     : 'Gym account'
 
   return (
-    <aside className="sidebar fixed left-0 top-0 z-40 flex h-screen w-60 flex-col border-r border-zinc-200 bg-white">
+    <aside className={`sidebar fixed left-0 top-0 z-40 flex h-screen w-60 flex-col border-r border-border bg-card text-card-foreground${mobileNavOpen ? ' mobile-nav-open' : ''}`}>
       <div className="brand-box">
         <div className="brand-mark">GF</div>
         <div>
           <p className="brand-title">Guru Fitness</p>
           <p className="brand-subtitle">Health Club</p>
         </div>
+        {onToggleMobileNav && (
+          <button
+            type="button"
+            className="mobile-nav-toggle"
+            aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+            aria-controls="primary-navigation"
+            aria-expanded={mobileNavOpen}
+            onClick={onToggleMobileNav}
+          >
+            {mobileNavOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
+          </button>
+        )}
       </div>
 
-      <nav className="nav-list" aria-label="Main navigation">
+      <nav className="nav-list" id="primary-navigation" aria-label="Main navigation">
         {navGroups.map((group) => {
           const groupItems = group.keys.map((key) => itemsByKey.get(key)).filter(Boolean)
           if (!groupItems.length) return null
@@ -70,8 +85,8 @@ export default function Sidebar({
                     type="button"
                     className={`nav-item rounded-md ${
                       selectedTab === item.key || (item.key === 'attendance' && selectedTab === 'scan')
-                        ? 'active bg-zinc-100 text-zinc-950 font-medium'
-                        : 'text-zinc-500 hover:bg-zinc-100/50 hover:text-zinc-950'
+                        ? 'active bg-muted text-foreground font-medium'
+                        : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                     }`}
                     aria-current={selectedTab === item.key || (item.key === 'attendance' && selectedTab === 'scan') ? 'page' : undefined}
                     onClick={() => navigate(item.key)}
@@ -89,13 +104,17 @@ export default function Sidebar({
       {onOpenAddMember && (
         <button
           type="button"
-          className="sidebar-add-member bg-zinc-900 hover:bg-zinc-900/90 text-zinc-50 h-9 px-4 py-2 rounded-md text-sm font-medium transition-colors shadow-sm inline-flex items-center justify-center"
+          className="sidebar-add-member"
           onClick={onOpenAddMember}
         >
           <UserRoundPlus size={17} strokeWidth={1.8} />
           <span>New Member</span>
         </button>
       )}
+
+      <div className="sidebar-appearance">
+        <ThemeToggle />
+      </div>
 
       <div className="sidebar-account">
         <div className="sidebar-account-avatar">{(userEmail || 'GF').slice(0, 1).toUpperCase()}</div>

@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { LockKeyhole, Mail } from 'lucide-react'
+import { Eye, EyeOff, LockKeyhole, Mail } from 'lucide-react'
+import { PolicyFooter } from '../pages/PolicyPage'
 
 export default function AuthScreen({
   isSupabaseReady,
@@ -14,6 +15,7 @@ export default function AuthScreen({
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
 
   const handleSubmit = (event) => {
     event.preventDefault()
@@ -25,39 +27,35 @@ export default function AuthScreen({
   }
 
   return (
-    <main className="login-page-wrapper">
+    <main id="main-content" className="login-page-wrapper">
+      <a className="skip-to-content" href="#login-card">Skip to sign in</a>
       <section className="login-branding" aria-label="Guru Fitness Health Club">
         <div className="login-brand">
           <span className="login-brand-mark">GF</span>
           <span className="login-brand-copy">
             <strong>Guru Fitness</strong>
-            <small>HEALTH CLUB · DHULE</small>
+            <small>HEALTH CLUB</small>
           </span>
         </div>
 
         <div className="login-hero">
-          <p className="login-eyebrow">GURU FITNESS HEALTH CLUB</p>
+          <p className="login-eyebrow">GURU FITNESS</p>
           <h1>Members, attendance and payments.</h1>
           <p className="login-hero-subtitle">
-            The front-desk workspace for Guru Fitness Health Club in Dhule.
+            A gym-management workspace for members, attendance, and payment records.
           </p>
         </div>
-
-        <dl className="login-business-details">
-          <div><dt>Location</dt><dd>Dhule, Maharashtra</dd></div>
-          <div><dt>Owner</dt><dd>Mr. Khushal Solanke</dd></div>
-        </dl>
       </section>
 
       <section className="login-access">
-        <div className="login-card">
+        <div className="login-card" id="login-card">
           <header className="login-card-header">
             <p className="login-card-eyebrow">{mode === 'signup' ? 'OWNER ACCESS' : 'STAFF ACCESS'}</p>
-            <h2>{mode === 'signup' ? 'Create an owner account' : 'Sign in'}</h2>
+            <h2>{mode === 'signup' ? 'Create an account' : 'Sign in'}</h2>
             <p>
               {isSupabaseReady
                 ? mode === 'signup'
-                  ? 'Set up access to the gym records.'
+                    ? 'Account registration does not grant gym access. An authorized administrator must assign your role.'
                   : 'Open the gym member, attendance and payment records.'
                 : 'Explore the app with local demo records.'}
             </p>
@@ -72,7 +70,7 @@ export default function AuthScreen({
                     type="text"
                     value={fullName}
                     onChange={(event) => setFullName(event.target.value)}
-                    placeholder="Gym Owner Name"
+                    placeholder="Your name"
                     required
                   />
                 </label>
@@ -86,7 +84,7 @@ export default function AuthScreen({
                     type="email"
                     value={email}
                     onChange={(event) => setEmail(event.target.value)}
-                    placeholder="owner@gurufitness.com"
+                    placeholder="name@example.com"
                     autoComplete="email"
                     required
                   />
@@ -94,13 +92,11 @@ export default function AuthScreen({
               </label>
 
               <label>
-                <span className="login-password-label">
-                  Password
-                </span>
+                <span className="login-password-label">Password</span>
                 <span className="login-input-wrap">
                   <LockKeyhole size={17} aria-hidden="true" />
                   <input
-                    type="password"
+                    type={showPassword ? 'text' : 'password'}
                     value={password}
                     onChange={(event) => setPassword(event.target.value)}
                     placeholder="Enter your password"
@@ -108,6 +104,15 @@ export default function AuthScreen({
                     required
                     minLength={6}
                   />
+                  <button
+                    type="button"
+                    className="password-visibility-toggle"
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPassword}
+                    onClick={() => setShowPassword((visible) => !visible)}
+                  >
+                    {showPassword ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+                  </button>
                 </span>
               </label>
 
@@ -144,22 +149,23 @@ export default function AuthScreen({
                 onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')}
                 disabled={isLoading}
               >
-                {mode === 'signin' ? 'Create an owner account' : 'Already have an account? Sign in'}
+                {mode === 'signin' ? 'Create an account' : 'Already have an account? Sign in'}
               </button>
             </form>
           ) : (
             <div className="auth-demo-actions">
               {error && <div className="auth-error" role="alert">{error}</div>}
               <button type="button" className="primary-button auth-button login-submit" onClick={onDemoContinue}>
-                Open demo
+                Open local demo
               </button>
-              <p className="auth-muted">Demo records are stored in this browser.</p>
+              <p className="auth-muted">Demonstration records are stored in this browser and are not live gym records.</p>
             </div>
           )}
 
           <a href="/member" className="login-member-portal-link">Member sign-in</a>
         </div>
       </section>
+      <PolicyFooter />
     </main>
   )
 }

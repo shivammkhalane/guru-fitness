@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowUpRight, Crown, MonitorUp, X } from 'lucide-react'
 import { dataService } from '../services/dataService'
+import useModalA11y from '../hooks/useModalA11y'
 
 const podiumClasses = ['first', 'second', 'third']
 const EMPTY_MEMBERS = []
@@ -8,6 +9,8 @@ const EMPTY_MEMBERS = []
 export default function GymLeaderboard({ members = EMPTY_MEMBERS }) {
   const [result, setResult] = useState({ signature: '', rows: [], error: '' })
   const [isWallDisplayOpen, setIsWallDisplayOpen] = useState(false)
+  const wallDisplayRef = useRef(null)
+  useModalA11y(isWallDisplayOpen, wallDisplayRef, () => setIsWallDisplayOpen(false))
   const memberSignature = members
     .map((member) => `${member.id || ''}:${member.memberId || ''}:${member.name || ''}`)
     .join('|')
@@ -77,7 +80,7 @@ export default function GymLeaderboard({ members = EMPTY_MEMBERS }) {
       </article>
 
       {isWallDisplayOpen && (
-        <div className="leaderboard-tv-overlay" role="dialog" aria-modal="true" aria-labelledby="leaderboard-tv-title">
+        <div className="leaderboard-tv-overlay" role="dialog" aria-modal="true" aria-labelledby="leaderboard-tv-title" ref={wallDisplayRef}>
           <button
             type="button"
             className="leaderboard-tv-close"
@@ -87,7 +90,7 @@ export default function GymLeaderboard({ members = EMPTY_MEMBERS }) {
             <X size={22} />
           </button>
           <header>
-            <p className="section-kicker">Guru Fitness · Dhule</p>
+            <p className="section-kicker">Guru Fitness</p>
             <h2 id="leaderboard-tv-title">Attendance streaks</h2>
             <p>Consistency is the strongest kind of progress.</p>
           </header>

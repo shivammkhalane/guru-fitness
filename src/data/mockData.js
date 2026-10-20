@@ -287,9 +287,9 @@ export const gymSettings = {
   gymName: 'Guru Fitness Health Club',
   shortName: 'Guru Fitness',
   monthlyMembership: 500,
-  phone: '+91 98765 43210',
-  city: 'Dhule, Maharashtra',
-  address: 'Station Road, Dhule, Maharashtra 424001',
+  phone: '',
+  city: '',
+  address: '',
 }
 
 export const initialPayments = [

@@ -39,3 +39,17 @@ export const sendWhatsAppNotification = async (memberCode, eventType, additional
   if (!data?.sent) throw new Error(data?.message || 'WhatsApp message was not sent.')
   return data
 }
+
+export const sendMemberWelcomeQrPass = async ({ phone, memberName, qrCodeImageUrl, expiryDate }) => {
+  if (!isSupabaseReady || !supabase) throw new Error('WhatsApp integration not configured.')
+
+  const { data, error } = await supabase.functions.invoke('whatsapp-notifications', {
+    body: { phone, memberName, qrCodeImageUrl, expiryDate },
+  })
+  if (error) {
+    const message = await readFunctionError(error)
+    throw new Error(message || 'WhatsApp QR pass was not sent. Check the server-side integration status.')
+  }
+  if (!data?.sent) throw new Error(data?.message || 'WhatsApp QR pass was not sent.')
+  return data
+}

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Activity, Apple, CalendarDays, CheckCircle2, Clock3, Dumbbell, LogOut, LockKeyhole, LoaderCircle, Phone, RefreshCw, Utensils } from 'lucide-react'
 import { isSupabaseReady, supabase } from '../services/supabaseService'
 import { formatCurrency, formatDate, getDaysUntilExpiry, getTodayIsoKolkata } from '../utils/gymLogic'
 import LiveWorkoutSession from './LiveWorkoutSession'
+import { PolicyFooter } from '../pages/PolicyPage'
 
 const normalizePhone = (value) => {
   const digits = String(value || '').replace(/\D/g, '')
@@ -83,7 +85,8 @@ const calculateOutstandingBalance = (memberships, payments) => {
   return Math.max(0, charges - collected)
 }
 
-export default function MemberPortal() {
+export default function MemberPortal({ redirectAfterAuthentication = false }) {
+  const navigate = useNavigate()
   const [phone, setPhone] = useState('')
   const [verificationCode, setVerificationCode] = useState('')
   const [verifiedPhone, setVerifiedPhone] = useState('')
@@ -92,6 +95,20 @@ export default function MemberPortal() {
   const [isLoadingMember, setIsLoadingMember] = useState(false)
   const [error, setError] = useState('')
   const [portalData, setPortalData] = useState(null)
+  const [dataRequestState, setDataRequestState] = useState({ authUserId: '', requests: [], error: '' })
+  const [isSubmittingDataRequest, setIsSubmittingDataRequest] = useState(false)
+
+  useEffect(() => {
+    document.title = redirectAfterAuthentication
+      ? 'Member sign in | Guru Fitness'
+      : 'Member portal | Guru Fitness'
+  }, [redirectAfterAuthentication])
+
+  useEffect(() => {
+    if (redirectAfterAuthentication && portalData) {
+      navigate('/member', { replace: true })
+    }
+  }, [navigate, portalData, redirectAfterAuthentication])
 
   const loadMemberDashboard = useCallback(async (user) => {
     if (!user?.id || !supabase) return false
@@ -101,7 +118,7 @@ export default function MemberPortal() {
     try {
       const { data: member, error: memberError } = await supabase
         .from('members')
-        .select('id, member_code, full_name, phone, status, photo_url, auth_user_id')
+        .select('id, gym_id, member_code, full_name, phone, status, photo_url, auth_user_id')
         .eq('auth_user_id', user.id)
         .maybeSingle()
 
@@ -198,6 +215,43 @@ export default function MemberPortal() {
       setIsLoadingMember(false)
     }
   }, [])
+
+  useEffect(() => {
+    const authUserId = portalData?.member?.auth_user_id
+    if (!authUserId || !supabase) return undefined
+    let cancelled = false
+
+    const loadRequests = async () => {
+      try {
+        const { data, error: requestError } = await supabase
+          .from('member_data_requests')
+          .select('id, request_type, status, created_at, updated_at')
+          .eq('requested_by', authUserId)
+          .order('created_at', { ascending: false })
+          .limit(5)
+        if (requestError) throw requestError
+        if (!cancelled) setDataRequestState({ authUserId, requests: data || [], error: '' })
+      } catch (requestError) {
+        if (!cancelled) {
+          setDataRequestState({
+            authUserId,
+            requests: [],
+            error: requestError.message || 'Could not load your data request status.',
+          })
+        }
+      }
+    }
+
+    loadRequests()
+    return () => { cancelled = true }
+  }, [portalData?.member?.auth_user_id])
+
+  const currentAuthUserId = portalData?.member?.auth_user_id || ''
+  const isLoadingDataRequests = Boolean(
+    currentAuthUserId && supabase && dataRequestState.authUserId !== currentAuthUserId,
+  )
+  const dataRequests = dataRequestState.authUserId === currentAuthUserId ? dataRequestState.requests : []
+  const dataRequestError = dataRequestState.authUserId === currentAuthUserId ? dataRequestState.error : ''
 
   useEffect(() => {
     if (!supabase) return
@@ -299,6 +353,66 @@ export default function MemberPortal() {
     }
   }
 
+  const handleSubmitDataDeletionRequest = async () => {
+    if (!portalData?.member || isSubmittingDataRequest) return
+    const hasOpenRequest = dataRequests.some((request) => ['pending', 'in_review'].includes(request.status))
+    if (hasOpenRequest) return
+    if (!window.confirm('Submit an account and associated-data deletion request for staff review? This will not delete records immediately.')) return
+
+    setIsSubmittingDataRequest(true)
+    try {
+      const { data, error: requestError } = await supabase
+        .from('member_data_requests')
+        .insert({
+          gym_id: portalData.member.gym_id,
+          member_id: portalData.member.id,
+          requested_by: portalData.member.auth_user_id,
+          request_type: 'account_deletion',
+        })
+        .select('id, request_type, status, created_at, updated_at')
+        .single()
+      if (requestError) throw requestError
+      setDataRequestState({
+        authUserId: portalData.member.auth_user_id,
+        requests: [data, ...dataRequests].slice(0, 5),
+        error: '',
+      })
+    } catch (requestError) {
+      setDataRequestState({
+        authUserId: portalData.member.auth_user_id,
+        requests: dataRequests,
+        error: requestError.message || 'Your request was not submitted. Please retry.',
+      })
+    } finally {
+      setIsSubmittingDataRequest(false)
+    }
+  }
+
+  const renderDataDeletionRequest = () => {
+    const hasOpenRequest = dataRequests.some((request) => ['pending', 'in_review'].includes(request.status))
+    return (
+      <section className="member-portal-card data-request-card" aria-labelledby="data-request-heading">
+        <h2 id="data-request-heading">Privacy and account deletion</h2>
+        <p>Submit a request for authorized staff to review. This action does not immediately erase records; the gym must assess its retention obligations and process the request.</p>
+        {isLoadingDataRequests && <p role="status">Loading request status…</p>}
+        {dataRequestError && <p className="member-portal-error" role="alert">{dataRequestError}</p>}
+        {!isLoadingDataRequests && dataRequests.map((request) => (
+          <p className="data-request-status" key={request.id}>
+            Request submitted {new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }).format(new Date(request.created_at))} · Status: {request.status.replaceAll('_', ' ')}
+          </p>
+        ))}
+        <button
+          type="button"
+          className="btn-outline"
+          disabled={isSubmittingDataRequest || isLoadingDataRequests || hasOpenRequest}
+          onClick={handleSubmitDataDeletionRequest}
+        >
+          {isSubmittingDataRequest ? 'Submitting request…' : hasOpenRequest ? 'Request is under review' : 'Request account and data deletion'}
+        </button>
+      </section>
+    )
+  }
+
   const today = getTodayIsoKolkata()
   const latestMembership = portalData?.latestMembership
   const isMembershipExpired = latestMembership?.expiry_date && latestMembership.expiry_date < today
@@ -308,8 +422,9 @@ export default function MemberPortal() {
 
   if (!isSupabaseReady) {
     return (
-      <main className="member-portal-page">
-        <section className="member-portal-auth member-portal-card">
+      <main id="main-content" className="member-portal-page">
+        <a className="skip-to-content" href="#member-content">Skip to member content</a>
+        <section className="member-portal-auth member-portal-card" id="member-content">
           <LockKeyhole className="member-portal-lock-icon" size={32} aria-hidden="true" />
           <p className="member-portal-eyebrow">MEMBER ACCESS</p>
           <h1>Member portal is unavailable</h1>
@@ -322,8 +437,9 @@ export default function MemberPortal() {
 
   if (isLoadingMember) {
     return (
-      <main className="member-portal-page">
-        <section className="member-portal-auth member-portal-card" role="status">
+      <main id="main-content" className="member-portal-page">
+        <a className="skip-to-content" href="#member-content">Skip to member content</a>
+        <section className="member-portal-auth member-portal-card" id="member-content" role="status">
           <LoaderCircle className="member-portal-spinner" size={30} aria-hidden="true" />
           <p>Loading your account…</p>
         </section>
@@ -333,8 +449,9 @@ export default function MemberPortal() {
 
   if (!portalData) {
     return (
-      <main className="member-portal-page">
-        <section className="member-portal-auth member-portal-card">
+      <main id="main-content" className="member-portal-page">
+        <a className="skip-to-content" href="#member-content">Skip to member content</a>
+        <section className="member-portal-auth member-portal-card" id="member-content">
           <a href="/" className="member-portal-brand" aria-label="Guru Fitness home">
             <span>GF</span>
             <strong>Guru Fitness<small>MEMBER PORTAL</small></strong>
@@ -386,15 +503,17 @@ export default function MemberPortal() {
           )}
 
           {error && <p className="member-portal-error" role="alert">{error}</p>}
-          <a href="/" className="member-portal-back-link">Gym staff? Return to owner sign-in</a>
+          <a href="/admin" className="member-portal-back-link">Gym Owner? Access Admin Dashboard</a>
         </section>
+        <PolicyFooter />
       </main>
     )
   }
 
   if (portalData.isLocked) {
     return (
-      <main className="member-portal-page">
+      <main id="main-content" className="member-portal-page">
+        <a className="skip-to-content" href="#member-content">Skip to member content</a>
         <section className="member-portal-locked member-portal-card">
           <button type="button" className="member-portal-signout" onClick={handleSignOut} disabled={isSubmitting}>
             <LogOut size={16} aria-hidden="true" /> Sign out
@@ -415,13 +534,16 @@ export default function MemberPortal() {
             <p className="member-portal-expiry">Membership expiry · {formatDate(latestMembership.expiry_date)}</p>
           )}
           {error && <p className="member-portal-error" role="alert">{error}</p>}
+          {renderDataDeletionRequest()}
         </section>
+        <PolicyFooter />
       </main>
     )
   }
 
   return (
-    <main className="member-portal-page member-portal-dashboard">
+    <main id="main-content" className="member-portal-page member-portal-dashboard">
+      <a className="skip-to-content" href="#member-content">Skip to member content</a>
       <header className="member-portal-topbar">
         <a href="/" className="member-portal-brand">
           <span>GF</span>
@@ -432,7 +554,7 @@ export default function MemberPortal() {
         </button>
       </header>
 
-      <div className="member-portal-content">
+      <div className="member-portal-content" id="member-content">
         <section className="member-portal-welcome">
           <div>
             <p className="member-portal-eyebrow">YOUR FITNESS</p>
@@ -501,8 +623,10 @@ export default function MemberPortal() {
         </section>
 
         <p className="member-portal-footer"><Clock3 size={14} aria-hidden="true" /> Need help with your account? Please speak with the Guru Fitness front desk.</p>
+        {renderDataDeletionRequest()}
         {error && <p className="member-portal-error" role="alert">{error}<button type="button" onClick={() => loadMemberDashboard({ id: portalData.member.auth_user_id, phone: portalData.member.phone })}><RefreshCw size={14} /> Retry</button></p>}
       </div>
+      <PolicyFooter />
     </main>
   )
 }

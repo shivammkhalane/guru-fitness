@@ -1,0 +1,5 @@
+# Guru Fitness OS
+
+Guru Fitness OS is a private gym-management application with member, membership, attendance, payment-record, and exercise-library interfaces. It includes a member portal when configured.
+
+This deployment has no verified public marketing site or configured canonical domain. Do not treat local demonstration records as live business data. Policy pages in the application are drafts requiring owner and legal review.

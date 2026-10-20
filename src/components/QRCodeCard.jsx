@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import Avatar from './Avatar'
+import useModalA11y from '../hooks/useModalA11y'
 
 export default function QRCodeCard({ member, onRegenerateToken }) {
   const canvasRef = useRef(null)
   const [qrDataUrl, setQrDataUrl] = useState('')
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [showModal, setShowModal] = useState(false)
+  const dialogRef = useRef(null)
+  useModalA11y(showModal, dialogRef, () => setShowModal(false))
 
-  // Use the opaque attendance token or fallback to memberId
-  const qrPayload = member?.qrToken || member?.memberId || 'UNKNOWN'
+  const qrPayload = member?.qrToken || ''
 
   useEffect(() => {
     if (!qrPayload) return
@@ -64,7 +66,7 @@ export default function QRCodeCard({ member, onRegenerateToken }) {
           <title>Guru Fitness Member Pass - ${member?.name}</title>
           <style>
             body {
-              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+              font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
               display: flex;
               align-items: center;
               justify-content: center;
@@ -175,10 +177,12 @@ export default function QRCodeCard({ member, onRegenerateToken }) {
       </div>
 
       <div className="qr-display-center">
-        <div className="qr-frame-wrapper" onClick={() => setShowModal(true)} title="Click to enlarge">
-          <canvas ref={canvasRef} className="qr-canvas-element" />
-          <div className="qr-scan-hint">🔍 Click to zoom</div>
-        </div>
+        {qrPayload ? (
+          <div className="qr-frame-wrapper" onClick={() => setShowModal(true)} title="Click to enlarge">
+            <canvas ref={canvasRef} className="qr-canvas-element" />
+            <div className="qr-scan-hint">🔍 Click to zoom</div>
+          </div>
+        ) : <p role="status">Secure QR token is unavailable for this member.</p>}
 
         <div className="qr-member-label">
           <div className="qr-member-name-row">
@@ -196,6 +200,7 @@ export default function QRCodeCard({ member, onRegenerateToken }) {
           type="button"
           className="secondary-button compact"
           onClick={() => setShowModal(true)}
+          disabled={!qrDataUrl}
         >
           View Full QR
         </button>
@@ -203,6 +208,7 @@ export default function QRCodeCard({ member, onRegenerateToken }) {
           type="button"
           className="secondary-button compact"
           onClick={handleDownload}
+          disabled={!qrDataUrl}
         >
           Download Card
         </button>
@@ -210,6 +216,7 @@ export default function QRCodeCard({ member, onRegenerateToken }) {
           type="button"
           className="secondary-button compact"
           onClick={handlePrint}
+          disabled={!qrDataUrl}
         >
           Print Pass
         </button>
@@ -228,16 +235,17 @@ export default function QRCodeCard({ member, onRegenerateToken }) {
 
       {showModal && (
         <div className="modal-backdrop" onClick={() => setShowModal(false)}>
-          <div className="modal-card qr-modal-card" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-card qr-modal-card" role="dialog" aria-modal="true" aria-labelledby="member-qr-modal-title" ref={dialogRef} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div>
-                <h2>Guru Fitness Member Pass</h2>
+                <h2 id="member-qr-modal-title">Guru Fitness Member Pass</h2>
                 <p className="modal-subtitle">Official Attendance QR</p>
               </div>
               <button
                 type="button"
                 className="close-button"
                 onClick={() => setShowModal(false)}
+                aria-label="Close member QR dialog"
               >
                 ×
               </button>

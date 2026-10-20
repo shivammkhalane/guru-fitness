@@ -1,8 +1,15 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
-import { Activity, ArrowUpRight, CalendarCheck2, CalendarDays, CheckCircle2, CircleDollarSign, CreditCard, LoaderCircle, ScanLine, UserRoundPlus, UsersRound, WalletCards, X, XCircle } from 'lucide-react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
+import { Activity, ArrowUpRight, CalendarCheck2, CalendarDays, CheckCircle2, CircleDollarSign, CreditCard, LoaderCircle, ScanLine, UserRoundPlus, WalletCards, X, XCircle } from 'lucide-react'
 import './App.css'
+import './zinc-theme.css'
 import Sidebar from './components/Sidebar'
+import GlobalSearch from './components/GlobalSearch'
+import ScrollUtilities from './components/ScrollUtilities'
+import CopyButton from './components/CopyButton'
+import useModalA11y from './hooks/useModalA11y'
+import MemberModal from './components/MemberModal'
+import ThemeToggle from './components/ThemeToggle'
 import Dashboard from './components/Dashboard'
 import Members from './components/Members'
 import Attendance from './components/Attendance'
@@ -14,20 +21,22 @@ import ToastList from './components/ToastList'
 import AuthScreen from './components/AuthScreen'
 import CheckInView from './components/CheckInView'
 import MemberPhoto from './components/MemberPhoto'
-import MemberPortal from './components/MemberPortal'
+import MemberLogin from './components/MemberLogin'
+import MemberDashboard from './components/MemberDashboard'
 import GymLeaderboard from './components/GymLeaderboard'
 import PeakHoursHeatmap from './components/PeakHoursHeatmap'
 import ChurnRadar from './components/ChurnRadar'
-import FloatingAIChat from './components/FloatingAIChat'
 import ExerciseDetail from './pages/ExerciseDetail'
 import ExerciseLibrary from './pages/ExerciseLibrary'
+import PolicyPage from './pages/PolicyPage'
+import NotFoundPage from './pages/NotFoundPage'
 import useQRScanner from './hooks/useQRScanner'
 import { appConfig } from './config/appConfig'
 import { dataService } from './services/dataService'
 import { isSupportedMemberPhoto, MAX_MEMBER_PHOTO_BYTES } from './services/memberPhotoService'
 import { sendWhatsAppNotification } from './services/whatsappNotificationService'
+import { sendMemberQrPass } from './services/qrPassService'
 import {
-  ensureCurrentUserProfile,
   getCurrentSession,
   isSupabaseReady,
   supabase,
@@ -38,10 +47,10 @@ import {
 } from './services/supabaseService'
 import {
   computeSummary,
+  displayMemberCode,
   formatCurrency,
   formatDate,
   getExpiringSoonMembers,
-  getMemberTodayAttendance,
   getMembershipStatus,
   getTodayAttendance,
   getTodayIsoKolkata,
@@ -69,6 +78,25 @@ let toastCounter = 0
 const getNextToastId = () => {
   toastCounter += 1
   return `toast-${toastCounter}`
+}
+
+const handleReviewMemberDataRequest = async (requestId) => {
+  try {
+    const { data, error } = await supabase
+      .from('member_data_requests')
+      .update({ status: 'in_review', updated_at: new Date().toISOString() })
+      .eq('id', requestId)
+      .eq('status', 'pending')
+      .select('id')
+      .maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('The request changed before it could be updated. Refresh and try again.')
+    setMemberDataRequests((previous) => previous.map((request) => (
+      request.id === requestId ? { ...request, status: 'in_review', updated_at: new Date().toISOString() } : request
+    )))
+  } catch (error) {
+    setMemberDataRequestsError(error.message || 'Could not update request status.')
+  }
 }
 
 const selectMemberPhoto = (event, setSelection, setError, pushToast) => {
@@ -137,18 +165,27 @@ const makeMemberForm = (plan = null) => {
     startDate,
     expiryDate: plan ? getPlanExpiryDate(plan, startDate) : startDate,
     paymentMethod: 'cash',
+    whatsappPassConsent: false,
     photo: '',
   }
 }
 
 function DashboardApp() {
-  const isMemberPortalRoute = window.location.pathname.replace(/\/+$/, '') === '/member'
+  const location = useLocation()
+  const { id: exerciseRouteId } = useParams()
+  const routePath = (location.pathname.replace(/^\/admin(?=\/|$)/, '').replace(/\/+$/, '') || '/')
   const [members, setMembers] = useState(() => (isSupabaseReady ? [] : dataService.getMembers()))
   const [payments, setPayments] = useState(() => (isSupabaseReady ? [] : dataService.getPayments()))
   const [ledgerSummary, setLedgerSummary] = useState(null)
-  const [settings, setSettings] = useState(() => (isSupabaseReady ? { gymName: 'Guru Fitness Health Club', monthlyMembership: 500, phone: '+91 98765 43210', city: 'Dhule', address: 'Dhule, Maharashtra, India' } : dataService.getSettings()))
+  const [settings, setSettings] = useState(() => (
+    isSupabaseReady
+      ? { gymName: '', monthlyMembership: 0, phone: '', city: '', address: '' }
+      : dataService.getSettings()
+  ))
   const [membershipPlans, setMembershipPlans] = useState([])
-  const [activeTab, setActiveTabState] = useState('dashboard')
+  const [activeTab, setActiveTabState] = useState(() => (
+    routePath === '/library' || routePath.startsWith('/exercise/') ? 'exercises' : 'dashboard'
+  ))
   const [selectedMemberId, setSelectedMemberId] = useState(null)
   const [memberFilter, setMemberFilter] = useState('All')
   const [searchQuery, setSearchQuery] = useState('')
@@ -163,15 +200,21 @@ function DashboardApp() {
   const [scanResult, setScanResult] = useState(null)
   const [toasts, setToasts] = useState([])
   const [memberForm, setMemberForm] = useState(makeMemberForm())
-  const [editMemberForm, setEditMemberForm] = useState({ fullName: '', phone: '', photo: '' })
+  const [editMemberForm, setEditMemberForm] = useState({ fullName: '', phone: '', photo: '', whatsappPassConsent: false })
   const [renewalForm, setRenewalForm] = useState({
     amount: 500,
     expiryDate: getTodayIsoKolkata(),
     planId: null,
   })
   const [session, setSession] = useState(null)
+  const [profileRole, setProfileRole] = useState('')
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [authLoading, setAuthLoading] = useState(() => isSupabaseReady)
   const [dashboardClock] = useState(() => new Date())
+  const [revenueDateRange, setRevenueDateRange] = useState(() => {
+    const end = getTodayIsoKolkata()
+    return { start: addDaysToIso(end, -6), end }
+  })
   const [authError, setAuthError] = useState('')
   const [isLoadingLiveData, setIsLoadingLiveData] = useState(false)
   const [liveDataError, setLiveDataError] = useState('')
@@ -184,6 +227,8 @@ function DashboardApp() {
   const [memberPhotoSelection, setMemberPhotoSelection] = useState({ file: null, previewUrl: '' })
   const [editPhotoSelection, setEditPhotoSelection] = useState({ file: null, previewUrl: '' })
   const [memberPhotoError, setMemberPhotoError] = useState('')
+  const [memberModalErrors, setMemberModalErrors] = useState({})
+  const [qrPassSendingMemberId, setQrPassSendingMemberId] = useState(null)
   const [editMemberError, setEditMemberError] = useState('')
   const [removeEditPhoto, setRemoveEditPhoto] = useState(false)
   const [showWhatsAppActions, setShowWhatsAppActions] = useState(false)
@@ -195,18 +240,69 @@ function DashboardApp() {
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [isRecordingPayment, setIsRecordingPayment] = useState(false)
   const [paymentForm, setPaymentForm] = useState({ memberCode: '', amount: '', paymentMethod: 'cash', paymentDate: getTodayIsoKolkata(), notes: '' })
+  const [memberDataRequests, setMemberDataRequests] = useState([])
+  const [memberDataRequestsError, setMemberDataRequestsError] = useState('')
+  const [isLoadingMemberDataRequests, setIsLoadingMemberDataRequests] = useState(false)
   const qrScanSequenceRef = useRef(0)
+  const editMemberDialogRef = useRef(null)
+  const whatsappDialogRef = useRef(null)
+  const paymentDialogRef = useRef(null)
+  const renewalDialogRef = useRef(null)
+  const userRole = isSupabaseReady ? profileRole : 'demo'
+
+  useModalA11y(showEditMember, editMemberDialogRef, () => setShowEditMember(false))
+  useModalA11y(showWhatsAppActions, whatsappDialogRef, () => setShowWhatsAppActions(false))
+  useModalA11y(showPaymentModal, paymentDialogRef, () => setShowPaymentModal(false))
+  useModalA11y(showRenewModal, renewalDialogRef, () => setShowRenewModal(false))
+
+  useEffect(() => {
+    if (!isSupabaseReady || !session || activeTab !== 'settings' || !['owner', 'admin'].includes(userRole)) return undefined
+    let cancelled = false
+
+    const loadRequests = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('member_data_requests')
+          .select('id, request_type, status, created_at, member:members(full_name, member_code)')
+          .order('created_at', { ascending: false })
+          .limit(50)
+        if (error) throw error
+        if (!cancelled) setMemberDataRequests(data || [])
+      } catch (error) {
+        if (!cancelled) setMemberDataRequestsError(error.message || 'Could not load member data requests.')
+      } finally {
+        if (!cancelled) setIsLoadingMemberDataRequests(false)
+      }
+    }
+
+    loadRequests()
+    return () => { cancelled = true }
+  }, [activeTab, session, userRole])
 
   const currentView = activeTab === 'attendance' ? 'scan' : activeTab
   const setActiveTab = (tab) => {
+    setMobileNavOpen(false)
     setActiveTabState(tab === 'scan' ? 'attendance' : tab)
+    if (tab === 'settings' && isSupabaseReady && ['owner', 'admin'].includes(userRole)) {
+      setMemberDataRequestsError('')
+      setIsLoadingMemberDataRequests(true)
+    }
     if (tab === 'scan' || tab === 'attendance') {
       setCheckInState({ type: 'idle' })
     }
   }
   const setCurrentView = setActiveTab
 
-  const userRole = session?.user?.app_metadata?.role || session?.user?.role || 'owner'
+  useEffect(() => {
+    const titles = {
+      '/': 'Gym management | Guru Fitness OS',
+      '/library': 'Exercise library | Guru Fitness OS',
+    }
+    document.title = routePath.startsWith('/exercise/')
+      ? 'Exercise details | Guru Fitness OS'
+      : (titles[routePath] || 'Gym management | Guru Fitness OS')
+    document.querySelector('meta[name="robots"]')?.setAttribute('content', 'noindex, nofollow')
+  }, [routePath])
 
   useEffect(() => {
     if (!isSupabaseReady) return
@@ -214,14 +310,36 @@ function DashboardApp() {
     let cancelled = false
 
     const restoreSession = async () => {
-      const { data, error } = await getCurrentSession()
-
-      if (!cancelled) {
-        if (error) {
-          setAuthError(error.message)
+      try {
+        const { data, error } = await getCurrentSession()
+        if (error) throw error
+        const restoredSession = data?.session || null
+        if (!restoredSession) {
+          if (!cancelled) setSession(null)
+          return
         }
-        setSession(data?.session || null)
-        setAuthLoading(false)
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', restoredSession.user.id)
+          .maybeSingle()
+        if (profileError) throw profileError
+        if (!profile || !['owner', 'admin', 'staff'].includes(profile.role)) {
+          await signOut()
+          if (!cancelled) {
+            setAuthError('This account has not been assigned gym staff access. Ask an authorized gym administrator to provision it.')
+            setSession(null)
+          }
+          return
+        }
+        if (!cancelled) {
+          setProfileRole(profile.role)
+          setSession(restoredSession)
+        }
+      } catch (error) {
+        if (!cancelled) setAuthError(error.message || 'Unable to restore the signed-in account.')
+      } finally {
+        if (!cancelled) setAuthLoading(false)
       }
     }
 
@@ -233,7 +351,7 @@ function DashboardApp() {
   }, [])
 
   useEffect(() => {
-    if (!session || !isSupabaseReady || isMemberPortalRoute) return
+    if (!session || !isSupabaseReady) return
 
     const loadLiveDatabase = async () => {
       setIsLoadingLiveData(true)
@@ -280,6 +398,9 @@ function DashboardApp() {
             }
           })
         }
+        if (Array.isArray(sbPlans) && sbPlans.length) {
+          setSettings((prev) => ({ ...prev, monthlyMembership: Number(sbPlans[0].price) || 0 }))
+        }
       } catch (err) {
         console.warn('Error loading live Supabase data:', err)
         // Surface load failures — an empty dashboard must never be mistaken
@@ -291,7 +412,7 @@ function DashboardApp() {
     }
 
     loadLiveDatabase()
-  }, [session, liveDataRetryToken, isMemberPortalRoute])
+  }, [session, liveDataRetryToken])
 
 
   useEffect(() => {
@@ -371,15 +492,23 @@ function DashboardApp() {
   const handleLogin = async (email, password) => {
     setAuthLoading(true)
     setAuthError('')
+    setProfileRole('')
 
     try {
       const result = await signInWithEmail(email, password)
-      setSession(result.session)
-      try {
-        await ensureCurrentUserProfile({ fullName: email.split('@')[0], role: 'owner' })
-      } catch (profErr) {
-        console.warn('Profile bootstrap error:', profErr)
+      if (!result.session?.user) throw new Error('Sign-in did not return an authenticated session.')
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', result.session.user.id)
+        .maybeSingle()
+      if (profileError) throw profileError
+      if (!profile || !['owner', 'admin', 'staff'].includes(profile.role)) {
+        await signOut()
+        throw new Error('This account has not been assigned gym staff access. Ask an authorized gym administrator to provision it.')
       }
+      setProfileRole(profile.role)
+      setSession(result.session)
     } catch (error) {
       setAuthError(error.message || 'Unable to sign in. Please check your credentials.')
     } finally {
@@ -401,20 +530,14 @@ function DashboardApp() {
   const handleSignUp = async (email, password, fullName) => {
     setAuthLoading(true)
     setAuthError('')
+    setProfileRole('')
 
     try {
       const result = await signUpWithEmail(email, password, { full_name: fullName })
       if (result.session) {
-        setSession(result.session)
-        try {
-          await ensureCurrentUserProfile({ fullName, role: 'owner' })
-        } catch (profErr) {
-          console.warn('Profile bootstrap error:', profErr)
-        }
-        pushToast('Account registered successfully', 'success')
-      } else {
-        pushToast('Registration submitted. Check your email or sign in.', 'success')
+        await signOut()
       }
+      setAuthError('Account registration does not grant gym access. An authorized administrator must provision your staff role before you can sign in.')
     } catch (error) {
       setAuthError(error.message || 'Unable to sign up. Please try again.')
     } finally {
@@ -423,7 +546,7 @@ function DashboardApp() {
   }
 
   const handleDemoContinue = () => {
-    setSession({ user: { email: 'demo@gurufitness.local', app_metadata: { role: 'owner' } } })
+    setSession({ user: { email: 'Local demo', app_metadata: { role: 'demo' } } })
     setAuthLoading(false)
     setAuthError('')
   }
@@ -432,13 +555,16 @@ function DashboardApp() {
     try {
       await signOut()
     } finally {
+      setProfileRole('')
       setSession(null)
     }
   }
 
   const visibleNavItems = userRole === 'staff'
     ? navItems.filter((item) => !['settings', 'payments'].includes(item.key))
-    : navItems
+    : ['owner', 'admin', 'demo'].includes(userRole)
+      ? navItems
+      : []
 
   const summary = useMemo(() => computeSummary(visibleMembers), [visibleMembers])
   const todayAttendance = useMemo(() => getTodayAttendance(visibleMembers), [visibleMembers])
@@ -458,16 +584,22 @@ function DashboardApp() {
     return totals
   }, [payments])
   const todayRevenue = paidRevenueByDate.get(todayIso) || 0
-  const weeklyRevenue = useMemo(() => Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(`${todayIso}T00:00:00Z`)
-    date.setUTCDate(date.getUTCDate() - (6 - index))
-    const isoDate = date.toISOString().slice(0, 10)
-    return {
-      date: isoDate,
-      label: new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', timeZone: 'UTC' }).format(date),
-      amount: paidRevenueByDate.get(isoDate) || 0,
+  const weeklyRevenue = useMemo(() => {
+    if (!revenueDateRange.start || !revenueDateRange.end || revenueDateRange.start > revenueDateRange.end) return []
+    const days = []
+    const date = new Date(`${revenueDateRange.start}T00:00:00Z`)
+    const endDate = new Date(`${revenueDateRange.end}T00:00:00Z`)
+    while (date <= endDate) {
+      const isoDate = date.toISOString().slice(0, 10)
+      days.push({
+        date: isoDate,
+        label: new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', timeZone: 'UTC' }).format(date),
+        amount: paidRevenueByDate.get(isoDate) || 0,
+      })
+      date.setUTCDate(date.getUTCDate() + 1)
     }
-  }), [paidRevenueByDate, todayIso])
+    return days
+  }, [paidRevenueByDate, revenueDateRange])
 
   const filteredMembers = useMemo(() => {
     const normalized = searchQuery.trim().toLowerCase()
@@ -514,6 +646,26 @@ function DashboardApp() {
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id))
     }, 2600)
+  }
+
+  const deliverMemberQrPass = async (member, successMessage = 'QR pass sent by WhatsApp') => {
+    if (!member) return false
+    if (!member.whatsappPassConsent) {
+      pushToast('WhatsApp QR pass not sent; member permission has not been recorded.', 'warning')
+      return false
+    }
+    setQrPassSendingMemberId(member.memberId)
+    try {
+      await sendMemberQrPass(member)
+      if (successMessage) pushToast(successMessage, 'success')
+      return true
+    } catch (error) {
+      console.warn('QR pass delivery failed; member was saved:', error)
+      pushToast('Member saved. QR pass could not be sent.', 'warning')
+      return false
+    } finally {
+      setQrPassSendingMemberId(null)
+    }
   }
 
   const handleMarkAttendance = async (memberId, allowExpired = false, { navigateToCheckIn = true } = {}) => {
@@ -683,7 +835,7 @@ function DashboardApp() {
   }
 
   useQRScanner(handleQRScan, {
-    enabled: Boolean(!isMemberPortalRoute && session && !authLoading && !isLoadingLiveData && currentView === 'dashboard'),
+    enabled: Boolean(session && !authLoading && !isLoadingLiveData && currentView === 'dashboard'),
   })
 
   useEffect(() => {
@@ -711,11 +863,19 @@ function DashboardApp() {
 
     setIsRenewingMembership(true)
     try {
+      const renewedMember = members.find((member) => member.memberId === renewMemberId)
       await dataService.renewMembership(renewMemberId, {
         amount: renewalForm.amount,
         expiryDate: renewalForm.expiryDate,
         planId: renewalForm.planId,
       })
+
+      if (isSupabaseReady && renewedMember?.whatsappPassConsent) {
+        void deliverMemberQrPass({
+          ...renewedMember,
+          expiryDate: renewalForm.expiryDate,
+        })
+      }
 
       if (isSupabaseReady && session) {
         const [nextMembers, nextPayments] = await Promise.all([
@@ -755,40 +915,9 @@ function DashboardApp() {
     }
   }
 
-  const handleCodeSubmit = async (code) => {
-    try {
-      const member = await dataService.getMemberByCode(code)
-
-      if (!member) {
-        const nextState = { type: 'notFound', code, pendingCode: code }
-        setCheckInState(nextState)
-        return
-      }
-
-      const todayEntry = getMemberTodayAttendance(member)
-      if (todayEntry) {
-        const nextState = { type: 'alreadyMarked', member, time: todayEntry.time || '—', code, pendingCode: code }
-        setCheckInState(nextState)
-        return
-      }
-
-      if (getMembershipStatus(member) === 'Expired') {
-        const nextState = { type: 'expired', member, code, pendingCode: code }
-        setCheckInState(nextState)
-        return
-      }
-
-      const nextState = { type: 'ready', member, code, pendingCode: code }
-      setCheckInState(nextState)
-    } catch {
-      const nextState = { type: 'notFound', code, pendingCode: code }
-      setCheckInState(nextState)
-      pushToast('Unable to look up member', 'warning')
-    }
-  }
-
   const openAddMember = () => {
     setMemberPhotoError('')
+    setMemberModalErrors({})
     setMemberPhotoSelection((previous) => {
       if (previous.previewUrl) URL.revokeObjectURL(previous.previewUrl)
       return { file: null, previewUrl: '' }
@@ -799,10 +928,20 @@ function DashboardApp() {
   const handleAddMember = async (event) => {
     event.preventDefault()
     if (isSubmittingMember) return
+
+    const normalizedPhone = normalizeIndianPhone(memberForm.phone)
+    const fee = memberForm.fee === '' ? Number.NaN : Number(memberForm.fee)
+    const validationErrors = {}
+    if (!memberForm.fullName.trim()) validationErrors.fullName = 'Name is required.'
+    if (!/^91[6-9]\d{9}$/.test(normalizedPhone)) validationErrors.phone = 'Enter a valid Indian mobile number.'
+    if (!membershipPlans.some((plan) => plan.id === memberForm.planId)) validationErrors.planId = 'Select a membership plan.'
+    if (!Number.isFinite(fee) || fee < 0) validationErrors.fee = 'Enter a fee of 0 or more.'
+    setMemberModalErrors(validationErrors)
+    if (Object.keys(validationErrors).length) return
+
     if (!memberPhotoSelection.file) {
       const message = 'Choose a profile photograph before registering this member.'
       setMemberPhotoError(message)
-      pushToast(message, 'warning')
       return
     }
 
@@ -818,7 +957,7 @@ function DashboardApp() {
 
       const created = await dataService.createMember({
         fullName: memberForm.fullName,
-        phone: memberForm.phone,
+        phone: normalizedPhone,
         memberId: memberForm.memberId,
         memberCode: memberForm.memberId,
         planId: memberForm.planId || resolvedPlan?.id || null,
@@ -829,31 +968,45 @@ function DashboardApp() {
         paymentMethod: memberForm.paymentMethod,
         photoFile: memberPhotoSelection.file,
         paymentMade: true,
+        whatsappPassConsent: memberForm.whatsappPassConsent,
       })
-
-      if (isSupabaseReady && session) {
-        const [nextMembers, nextPayments] = await Promise.all([
-          dataService.getMembersFromSupabase(),
-          dataService.getPaymentsFromSupabase(),
-        ])
-        setMembers(nextMembers)
-        setPayments(nextPayments)
-      } else {
-        setMembers((prev) => [created, ...prev.filter((m) => m.memberId !== created.memberId)])
-      }
+      setMembers((prev) => [created, ...prev.filter((member) => member.memberId !== created.memberId)])
 
       selectMember(created.memberId)
       setShowAddMember(false)
       setMemberForm(makeMemberForm())
+      setMemberModalErrors({})
       setMemberPhotoSelection((previous) => {
         if (previous.previewUrl) URL.revokeObjectURL(previous.previewUrl)
         return { file: null, previewUrl: '' }
       })
       setCurrentView('members')
-      pushToast('Member added successfully', 'success')
+      pushToast(
+        memberForm.whatsappPassConsent
+          ? 'Member added successfully; QR pass delivery is starting.'
+          : 'Member added successfully. WhatsApp QR pass was not sent because permission was not recorded.',
+        memberForm.whatsappPassConsent ? 'success' : 'warning',
+      )
+
+      if (memberForm.whatsappPassConsent) void deliverMemberQrPass(created, '')
+
+      if (isSupabaseReady && session) {
+        void (async () => {
+          try {
+            const [nextMembers, nextPayments] = await Promise.all([
+              dataService.getMembersFromSupabase(),
+              dataService.getPaymentsFromSupabase(),
+            ])
+            setMembers(nextMembers)
+            setPayments(nextPayments)
+          } catch (error) {
+            console.warn('Member was saved, but the member list refresh failed:', error)
+          }
+        })()
+      }
     } catch (err) {
       const message = err.message || 'Failed to add member.'
-      setMemberPhotoError(message)
+      setMemberModalErrors({ form: message })
       pushToast(message, 'warning')
     } finally {
       setIsSubmittingMember(false)
@@ -869,6 +1022,7 @@ function DashboardApp() {
       fullName: member.name,
       phone: member.phone,
       photo: member.photo || '',
+      whatsappPassConsent: member.whatsappPassConsent === true,
     })
     setEditPhotoSelection((previous) => {
       if (previous.previewUrl) URL.revokeObjectURL(previous.previewUrl)
@@ -889,6 +1043,7 @@ function DashboardApp() {
         phone: editMemberForm.phone,
         photoFile: editPhotoSelection.file,
         removePhoto: removeEditPhoto,
+        whatsappPassConsent: editMemberForm.whatsappPassConsent,
       })
 
       if (removeEditPhoto) {
@@ -917,10 +1072,9 @@ function DashboardApp() {
 
   const normalizeIndianPhone = (phone) => {
     if (!phone) return ''
-    const digits = phone.replace(/\D/g, '')
-    if (digits.length === 10) return `91${digits}`
-    if (digits.length === 12 && digits.startsWith('91')) return digits
-    return digits
+    const digits = String(phone).replace(/\D/g, '')
+    const nationalNumber = digits.length === 10 ? digits : digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : ''
+    return /^[6-9]\d{9}$/.test(nationalNumber) ? `91${nationalNumber}` : digits
   }
 
   const whatsappUrl = (phone, text) => {
@@ -933,14 +1087,11 @@ function DashboardApp() {
   const openWhatsAppActions = async () => {
     setShowWhatsAppActions(true)
     setIsCheckingWhatsApp(true)
-    setIsWhatsAppConfigured(false)
     try {
       if (!selectedMember || !selectedMember.phone) {
-        setIsWhatsAppConfigured(false)
         pushToast('Member phone number is required for WhatsApp.', 'warning')
         return
       }
-      setIsWhatsAppConfigured(true)
     } finally {
       setIsCheckingWhatsApp(false)
     }
@@ -1070,9 +1221,9 @@ function DashboardApp() {
 
   const renderStatusBadge = (value) => {
     const classNames = {
-      Active: 'status-success',
-      'Expiring Soon': 'status-warning',
-      Expired: 'status-danger',
+      Active: 'badge-active',
+      'Expiring Soon': 'badge-expiring',
+      Expired: 'badge-expired',
     }
 
     return <span className={`status-pill ${classNames[value] || ''}`}>{value}</span>
@@ -1092,71 +1243,51 @@ function DashboardApp() {
 
         <header className="dashboard-header">
           <div>
-            <p className="dashboard-greeting">Guru Fitness Health Club · Dhule</p>
-            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Gym overview</h1>
+            <p className="dashboard-greeting">{settings.gymName || 'Gym overview'}</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Gym overview</h1>
             <p className="dashboard-date"><CalendarDays size={15} /> {todayLabel}</p>
           </div>
           <div className="dashboard-actions">
-            <button type="button" className="primary-button bg-[#007AFF] hover:bg-[#0062CC] text-white font-medium px-4 py-2 rounded-xl shadow-sm transition-colors active:scale-[0.98]" onClick={onOpenAddMember}><UserRoundPlus className="text-white" size={16} /> Add Member</button>
-            <button type="button" className="secondary-button" onClick={() => onNavigate('attendance')}><ScanLine className="text-gray-400" size={16} /> Record attendance</button>
-            <button type="button" className="secondary-button" onClick={openPaymentModal}><CreditCard className="text-gray-400" size={16} /> Record payment</button>
+            <button type="button" className="btn-primary" onClick={onOpenAddMember}><UserRoundPlus size={16} /> Add Member</button>
+            <button type="button" className="btn-outline" onClick={() => onNavigate('attendance')}><ScanLine className="text-muted-foreground" size={16} /> Record attendance</button>
+            <button type="button" className="btn-outline" onClick={openPaymentModal}><CreditCard className="text-muted-foreground" size={16} /> Record payment</button>
           </div>
         </header>
 
         <section className="dashboard-kpis" aria-label="Gym performance">
-          <article className="dashboard-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Total Members</span><UsersRound className="text-gray-400" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{summary.totalMembers.toLocaleString('en-IN')}</strong>
-            <small>Registered member records</small>
+          <article className="dashboard-kpi card">
+            <div className="kpi-heading"><span>Total Revenue</span><CircleDollarSign className="text-muted-foreground" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-foreground">{ledgerSummary ? formatCurrency(ledgerSummary.revenueCollected) : '—'}</strong>
+            <small>Today: {formatCurrency(todayRevenue)}</small>
           </article>
-          <article className="dashboard-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Active Members</span><Activity className="text-gray-400" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{summary.activeMembers.toLocaleString('en-IN')}</strong>
+          <article className="dashboard-kpi card">
+            <div className="kpi-heading"><span>Active Members</span><Activity className="text-muted-foreground" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-foreground">{summary.activeMembers.toLocaleString('en-IN')}</strong>
             <small>Membership active today</small>
           </article>
-          <article className="dashboard-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Today&apos;s Attendance</span><CalendarCheck2 className="text-gray-400" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{summary.todayAttendanceCount.toLocaleString('en-IN')}</strong>
+          <article className="dashboard-kpi card">
+            <div className="kpi-heading"><span>Check-ins Today</span><CalendarCheck2 className="text-muted-foreground" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-foreground">{summary.todayAttendanceCount.toLocaleString('en-IN')}</strong>
             <small>Check-ins recorded today</small>
           </article>
-          <article className="dashboard-kpi revenue-kpi ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-            <div className="kpi-heading text-xs font-medium uppercase tracking-wider text-gray-500"><span>Today&apos;s Revenue</span><CircleDollarSign className="text-gray-400" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-gray-900">{formatCurrency(todayRevenue)}</strong>
-            <small>Payments received today</small>
+          <article className="dashboard-kpi card">
+            <div className="kpi-heading"><span>Expiring Soon</span><CalendarDays className="text-muted-foreground" size={18} /></div>
+            <strong className="text-3xl font-semibold tracking-tight text-foreground">{summary.expiringSoonCount.toLocaleString('en-IN')}</strong>
+            <small>Memberships nearing expiry</small>
           </article>
         </section>
 
         <section className="dashboard-overview-grid">
-          <article className="dashboard-panel attendance-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+          <article className="dashboard-panel revenue-overview card">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Today</p><h2 className="text-gray-900 font-semibold">Recent attendance</h2></div>
-              <button type="button" className="text-action" onClick={() => onNavigate('attendance')}>View all <ArrowUpRight size={15} /></button>
+              <div><p className="section-kicker">Revenue</p><h2 className="text-foreground font-semibold">Revenue by day</h2></div>
+              <strong className="revenue-total">{formatCurrency(weeklyRevenue.reduce((total, day) => total + day.amount, 0))}</strong>
+              <div className="revenue-date-range">
+                <label>From <input className="input" type="date" value={revenueDateRange.start} max={revenueDateRange.end || todayIso} onChange={(event) => setRevenueDateRange((previous) => ({ ...previous, start: event.target.value }))} /></label>
+                <label>To <input className="input" type="date" value={revenueDateRange.end} min={revenueDateRange.start} max={todayIso} onChange={(event) => setRevenueDateRange((previous) => ({ ...previous, end: event.target.value }))} /></label>
+              </div>
             </div>
-            <div className="dashboard-table-wrap">
-              <table className="dashboard-table attendance-table">
-                <thead><tr><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Member</th><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Member ID</th><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Check-in</th><th className="text-xs font-medium uppercase tracking-wider text-gray-500">Status</th></tr></thead>
-                <tbody>
-                  {todayAttendance.length ? todayAttendance.slice(0, 5).map((person) => (
-                    <tr key={person.memberId}>
-                      <td><span className="dashboard-attendance-member"><Avatar name={person.name} small /><strong>{person.name}</strong></span></td>
-                      <td>#{person.memberId}</td>
-                      <td>{person.time}</td>
-                      <td><span className={`dashboard-attendance-status ${person.status === 'Override' ? 'override' : ''}`}>{person.status}</span></td>
-                    </tr>
-                  )) : (
-                    <tr><td colSpan="4"><p className="dashboard-empty">No attendance recorded today.</p></td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </article>
-
-          <article className="dashboard-panel revenue-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-            <div className="dashboard-panel-heading">
-              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Last seven days</p><h2 className="text-gray-900 font-semibold">Revenue overview</h2></div>
-              <strong className="revenue-total text-gray-900">{formatCurrency(weeklyRevenue.reduce((total, day) => total + day.amount, 0))}</strong>
-            </div>
-            <div className="revenue-chart" role="img" aria-label="Paid revenue for the last seven days">
+            <div className="revenue-chart" role="img" aria-label={`Paid revenue from ${revenueDateRange.start} through ${revenueDateRange.end}`}>
               {weeklyRevenue.map((day) => (
                 <div className="revenue-day" key={day.date} title={`${day.label}: ${formatCurrency(day.amount)}`}>
                   <span>{day.amount ? formatCurrency(day.amount) : '—'}</span>
@@ -1164,14 +1295,32 @@ function DashboardApp() {
                   <small>{day.label}</small>
                 </div>
               ))}
+              {!weeklyRevenue.length && <p className="dashboard-empty">Choose a valid date range.</p>}
             </div>
+          </article>
+
+          <article className="dashboard-panel attendance-overview card">
+            <div className="dashboard-panel-heading">
+              <div><p className="section-kicker">Today</p><h2 className="text-foreground font-semibold">Recent check-ins</h2></div>
+              <button type="button" className="text-action" onClick={() => onNavigate('attendance')}>View all <ArrowUpRight size={15} /></button>
+            </div>
+            {todayAttendance.length ? todayAttendance.slice(0, 5).map((person) => {
+              const member = visibleMembers.find((entry) => displayMemberCode(entry) === String(person.memberId))
+              return (
+                <div className="recent-checkin-row" key={`${person.memberId}-${person.time}`}>
+                  <Avatar name={person.name} small />
+                  <div className="dashboard-row-main"><strong>{person.name}</strong><span>{member?.plan || '—'}</span></div>
+                  <span className="recent-checkin-time">{person.time}</span>
+                </div>
+              )
+            }) : <p className="dashboard-empty">No check-ins recorded today.</p>}
           </article>
         </section>
 
         <section className="dashboard-lower-grid">
-          <article className="dashboard-panel expiring-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+          <article className="dashboard-panel expiring-overview card">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Membership health</p><h2 className="text-gray-900 font-semibold">Expiring soon</h2></div>
+              <div><p className="section-kicker">Membership health</p><h2 className="text-foreground font-semibold">Expiring soon</h2></div>
               <button type="button" className="text-action" onClick={() => { setMemberFilter('Expiring Soon'); setMembersPage(1); onNavigate('members') }}>View all <ArrowUpRight size={15} /></button>
             </div>
             {expiringSoon.length ? expiringSoon.slice(0, 3).map((member) => (
@@ -1184,14 +1333,14 @@ function DashboardApp() {
             )) : <p className="dashboard-empty">No memberships are expiring soon.</p>}
           </article>
 
-          <article className="dashboard-panel payments-overview ios-card bg-white rounded-2xl border border-black/5 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
+          <article className="dashboard-panel payments-overview card">
             <div className="dashboard-panel-heading">
-              <div><p className="section-kicker text-xs font-medium uppercase tracking-wider text-gray-500">Cash flow</p><h2 className="text-gray-900 font-semibold">Recent payments</h2></div>
+              <div><p className="section-kicker">Cash flow</p><h2 className="text-foreground font-semibold">Recent payments</h2></div>
               <button type="button" className="text-action" onClick={() => onNavigate('payments')}>View all <ArrowUpRight size={15} /></button>
             </div>
             {recentPayments.length ? recentPayments.map((payment) => (
               <div className="payment-overview-row" key={payment.id || `${payment.receiptNumber}-${payment.date}`}>
-                <div className="payment-mark"><WalletCards className="text-gray-400" size={17} /></div>
+                <div className="payment-mark"><WalletCards className="text-muted-foreground" size={17} /></div>
                 <div className="dashboard-row-main"><strong>{payment.member}</strong><span>{payment.method}</span></div>
                 <div className="payment-amount"><strong>{formatCurrency(payment.amount)}</strong><span>{formatDate(payment.date)}</span></div>
               </div>
@@ -1210,39 +1359,12 @@ function DashboardApp() {
 
   const renderScanPage = () => (
     <CheckInView
+      members={visibleMembers}
+      todayAttendance={todayAttendance}
       checkInState={checkInState}
       isMarkingAttendance={isMarkingAttendance}
-      onCodeSubmit={handleCodeSubmit}
       onMarkAttendance={(memberId, allowExpired = false) => handleMarkAttendance(memberId, allowExpired)}
       onScanQr={async (qrText) => {
-        if (!isSupabaseReady || !session) {
-          pushToast('Scan requires a live Supabase connection.', 'warning')
-          return
-        }
-        const member = await dataService.getMemberByQrToken(qrText)
-        if (!member) {
-          pushToast('Invalid QR Code. Member not found.', 'warning')
-          setCheckInState({ type: 'notFound', code: 'QR', pendingCode: '' })
-          setTimeout(() => {
-            setCheckInState((prev) => (prev.type === 'notFound' ? { type: 'idle' } : prev))
-          }, 3000)
-          return
-        }
-        if (getMembershipStatus(member) === 'Expired') {
-          setCheckInState({ type: 'expired', member, pendingCode: member.memberId })
-          return
-        }
-        await handleMarkAttendance(member.memberId)
-        setTimeout(() => {
-          setCheckInState((prev) => {
-            if (prev.type === 'success' || prev.type === 'alreadyMarked' || prev.type === 'successWarning') {
-              return { type: 'idle' }
-            }
-            return prev
-          })
-        }, 3000)
-      }}
-      onUsbScan={async (qrText) => {
         if (!isSupabaseReady || !session) {
           pushToast('Scan requires a live Supabase connection.', 'warning')
           return
@@ -1307,6 +1429,8 @@ function DashboardApp() {
       onAddMember={openAddMember}
       onSelectMember={selectMember}
       onEditMember={openEditMember}
+      onCopied={(label) => pushToast(`${label} copied`, 'success')}
+      onCopyError={() => pushToast('Could not copy to clipboard. Check browser permissions.', 'warning')}
       getMembershipStatus={getMembershipStatus}
       formatDate={formatDate}
     >
@@ -1336,6 +1460,18 @@ function DashboardApp() {
             <button type="button" className="secondary-button" onClick={() => openEditMember(selectedMember)}>
               Edit
             </button>
+            {selectedMember.whatsappPassConsent ? (
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={Boolean(qrPassSendingMemberId)}
+                onClick={() => void deliverMemberQrPass(selectedMember)}
+              >
+                {qrPassSendingMemberId === selectedMember.memberId ? 'Sending QR pass…' : 'Resend QR pass'}
+              </button>
+            ) : (
+              <span className="muted-copy">WhatsApp QR pass permission not recorded.</span>
+            )}
             <button
               type="button"
               className="secondary-button whatsapp-send-button"
@@ -1449,7 +1585,11 @@ function DashboardApp() {
         <StatsCard label="Active" value={membershipCounts.active.toString()} accent="green" />
         <StatsCard label="Expiring Soon" value={membershipCounts.expiringSoon.toString()} accent="amber" />
         <StatsCard label="Expired" value={membershipCounts.expired.toString()} accent="red" />
-        <StatsCard label="Monthly Plan" value={formatCurrency(settings.monthlyMembership)} accent="dark" />
+        <StatsCard
+          label={membershipPlans.length === 1 ? `${membershipPlans[0].name} Plan` : 'Lowest Active Plan'}
+          value={membershipPlans.length ? formatCurrency(Math.min(...membershipPlans.map((plan) => Number(plan.price) || 0))) : '—'}
+          accent="dark"
+        />
       </section>
 
       <div className="table-card">
@@ -1536,7 +1676,19 @@ function DashboardApp() {
                 <tr key={payment.id || `${payment.receiptNumber || payment.member}-${index}`}>
                   <td>{formatDate(payment.date)}</td>
                   <td>{payment.member}</td>
-                  <td>{payment.receiptNumber || '—'}</td>
+                  <td>
+                    {payment.receiptNumber ? (
+                      <span className="copy-value">
+                        {payment.receiptNumber}
+                        <CopyButton
+                          value={payment.receiptNumber}
+                          label="receipt reference"
+                          onCopied={() => pushToast('Receipt reference copied', 'success')}
+                          onError={() => pushToast('Could not copy to clipboard. Check browser permissions.', 'warning')}
+                        />
+                      </span>
+                    ) : '—'}
+                  </td>
                   <td>{formatCurrency(payment.amount)}</td>
                   <td>{payment.method}</td>
                   <td>{payment.period}</td>
@@ -1596,25 +1748,6 @@ function DashboardApp() {
             />
           </label>
           <label>
-            <span>Monthly Membership</span>
-            <input
-              type="number"
-              value={settings.monthlyMembership}
-              onChange={(event) => setSettings((prev) => ({ ...prev, monthlyMembership: Number(event.target.value) }))}
-            />
-          </label>
-        </div>
-
-        <div className="field-row two-up">
-          <label>
-            <span>Phone</span>
-            <input
-              type="tel"
-              value={settings.phone}
-              onChange={(event) => setSettings((prev) => ({ ...prev, phone: event.target.value }))}
-            />
-          </label>
-          <label>
             <span>City</span>
             <input
               type="text"
@@ -1624,19 +1757,54 @@ function DashboardApp() {
           </label>
         </div>
 
-        <label>
-          <span>Address</span>
-          <textarea
-            rows="4"
-            value={settings.address}
-            onChange={(event) => setSettings((prev) => ({ ...prev, address: event.target.value }))}
-          />
-        </label>
-
         <div className="button-row right-align">
           <button type="submit" className="primary-button">Save Changes</button>
         </div>
       </form>
+
+      {isSupabaseReady && ['owner', 'admin'].includes(userRole) && (
+        <section className="card data-request-admin-card" aria-labelledby="data-requests-title">
+          <div>
+            <h2 id="data-requests-title">Member data requests</h2>
+            <p className="muted-copy">Review account-deletion requests from linked member accounts. Mark a request completed only after you have handled it under an owner-approved retention process.</p>
+          </div>
+          {memberDataRequestsError && <p className="member-portal-error" role="alert">{memberDataRequestsError}</p>}
+          {isLoadingMemberDataRequests ? (
+            <p role="status">Loading data requests…</p>
+          ) : memberDataRequests.length ? (
+            <ul className="data-request-admin-list">
+              {memberDataRequests.map((request) => (
+                <li key={request.id}>
+                  <div>
+                    <strong>{request.member?.full_name || 'Member record unavailable'}</strong>
+                    <span>
+                      {request.member?.member_code ? `Member #${request.member.member_code} · ` : ''}
+                      {new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeZone: 'Asia/Kolkata' }).format(new Date(request.created_at))}
+                    </span>
+                    <small>Status: {request.status.replaceAll('_', ' ')}</small>
+                  </div>
+                  {request.status === 'pending' && (
+                    <button type="button" className="btn-outline" onClick={() => handleReviewMemberDataRequest(request.id)}>
+                      Mark in review
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p role="status">No member data requests have been submitted.</p>
+          )}
+          <p className="field-help">This app queues and tracks requests; it does not automatically erase financial, attendance, member, or authentication records. Apply the approved retention decision and mark completion in the protected Supabase database.</p>
+        </section>
+      )}
+
+      <section className="card settings-appearance-row">
+        <div>
+          <h2>Appearance</h2>
+          <p className="muted-copy">Choose light or dark mode for this device.</p>
+        </div>
+        <ThemeToggle />
+      </section>
     </div>
   )
 
@@ -1653,15 +1821,11 @@ function DashboardApp() {
       case 'settings':
         return <Settings>{renderSettingsPage()}</Settings>
       case 'exercises':
-        return <ExerciseLibrary />
+        return exerciseRouteId ? <ExerciseDetail /> : <ExerciseLibrary />
       case 'dashboard':
       default:
         return renderDashboard({ onOpenAddMember: openAddMember, onNavigate: setActiveTab })
     }
-  }
-
-  if (isMemberPortalRoute) {
-    return <MemberPortal />
   }
 
   if (!session && isSupabaseReady) {
@@ -1694,7 +1858,7 @@ function DashboardApp() {
 
   if (isSupabaseReady && session && isLoadingLiveData) {
     return (
-      <div className="app-shell ios-light-shell flex h-screen bg-[#F5F5F7] text-[#1D1D1F] overflow-hidden">
+      <div className="app-shell ios-light-shell flex h-screen bg-background text-foreground overflow-hidden">
         <Sidebar
           navItems={visibleNavItems}
           activeTab={activeTab}
@@ -1703,42 +1867,71 @@ function DashboardApp() {
           userEmail={session?.user?.email}
           userRole={userRole}
           onLogout={handleLogout}
+          mobileNavOpen={mobileNavOpen}
+          onToggleMobileNav={() => setMobileNavOpen((isOpen) => !isOpen)}
         />
         <main className="main-panel flex-1 min-w-0">
-          <div className="page-shell">
-            <div className="mode-banner">
-              <span className="demo-badge" style={{ opacity: 0 }}>Loading</span>
-              Loading live gym data…
+            <a className="skip-to-content" href="#main-content">Skip to main content</a>
+            <GlobalSearch
+              navItems={visibleNavItems}
+              members={visibleMembers}
+              onNavigate={setActiveTab}
+              onSelectMember={selectMember}
+            />
+            {!isSupabaseReady && (
+              <div className="demo-data-notice" role="note">
+                Demonstration data only — examples are stored in this browser and are not live gym records.
+              </div>
+            )}
+            <div className="page-shell">
+              <div className="mode-banner">
+                <span className="loading-spinner" aria-hidden="true" />
+                <span role="status">Loading live gym data…</span>
+              </div>
+              <div className="stats-grid" aria-hidden="true">
+                {[1, 2, 3, 4].map((item) => (
+                  <div key={item} className="stats-card skeleton-card" />
+                ))}
+              </div>
+              <div className="member-list-grid" aria-hidden="true">
+                {[1, 2, 3].map((item) => (
+                  <div key={item} className="member-card skeleton-card" />
+                ))}
+              </div>
             </div>
-            <div className="stats-grid" style={{ opacity: 0.45 }}>
-              {[1, 2, 3, 4].map((item) => (
-                <div key={item} className="stats-card skeleton-card" />
-              ))}
-            </div>
-            <div className="member-list-grid" style={{ opacity: 0.45 }}>
-              {[1, 2, 3].map((item) => (
-                <div key={item} className="member-card skeleton-card" />
-              ))}
-            </div>
-          </div>
-        </main>
-      </div>
+          </main>
+          <ScrollUtilities />
+        </div>
     )
   }
 
   return (
-    <div className="app-shell ios-light-shell flex h-screen bg-[#F5F5F7] text-[#1D1D1F] overflow-hidden">
-      <Sidebar
-        navItems={visibleNavItems}
-      activeTab={activeTab}
+    <div className={`app-shell ios-light-shell flex h-screen bg-background text-foreground overflow-hidden${mobileNavOpen ? ' mobile-nav-open' : ''}`}>
+        <a className="skip-to-content" href="#main-content">Skip to main content</a>
+        <Sidebar
+          navItems={visibleNavItems}
+        activeTab={activeTab}
       setActiveTab={setActiveTab}
       onOpenAddMember={openAddMember}
       userEmail={session?.user?.email}
       userRole={userRole}
       onLogout={handleLogout}
+      mobileNavOpen={mobileNavOpen}
+      onToggleMobileNav={() => setMobileNavOpen((isOpen) => !isOpen)}
     />
 
-    <main className="main-panel flex-1 min-w-0">
+    <main className="main-panel flex-1 min-w-0" id="main-content" tabIndex="-1">
+        <GlobalSearch
+          navItems={visibleNavItems}
+          members={visibleMembers}
+          onNavigate={setActiveTab}
+          onSelectMember={selectMember}
+        />
+        {!isSupabaseReady && (
+          <div className="demo-data-notice" role="note">
+            Demonstration data only — examples are stored in this browser and are not live gym records.
+          </div>
+        )}
         {liveDataError && (
           <div className="live-data-error-banner" role="alert">
             <span className="demo-badge">Sync failed</span>
@@ -1805,160 +1998,30 @@ function DashboardApp() {
       )}
 
       {showAddMember && (
-        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowAddMember(false)}>
-          <div
-            className="modal-card registration-modal-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="add-member-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="modal-header">
-              <h2 id="add-member-title">Add Member</h2>
-              <button type="button" className="close-button" onClick={() => setShowAddMember(false)}>×</button>
-            </div>
-
-            <form onSubmit={handleAddMember} className="member-form">
-              <div className="field-row two-up">
-                <label>
-                  <span>Full Name</span>
-                  <input
-                    type="text"
-                    value={memberForm.fullName}
-                    onChange={(event) => setMemberForm((prev) => ({ ...prev, fullName: event.target.value }))}
-                    required
-                  />
-                </label>
-                <label>
-                  <span>Phone Number</span>
-                  <input
-                    type="tel"
-                    value={memberForm.phone}
-                    onChange={(event) => setMemberForm((prev) => ({ ...prev, phone: event.target.value }))}
-                    required
-                  />
-                </label>
-              </div>
-
-              <div className="field-row two-up">
-                <label>
-                  <span>Member Code</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={3}
-                    value={memberForm.memberId}
-                    onChange={(event) => setMemberForm((prev) => ({ ...prev, memberId: event.target.value.replace(/\D/g, '').slice(0, 3) }))}
-                    placeholder="Optional"
-                  />
-                </label>
-                <label>
-                  <span>Membership Plan</span>
-                  <select
-                    value={memberForm.planId || ''}
-                    onChange={(event) => {
-                      const nextPlan = membershipPlans.find((plan) => plan.id === event.target.value)
-                      setMemberForm((prev) => ({
-                        ...prev,
-                        planId: event.target.value,
-                        plan: nextPlan?.name || '',
-                        fee: String(nextPlan ? Number(nextPlan.price || 0) : ''),
-                        expiryDate: nextPlan ? getPlanExpiryDate(nextPlan, prev.startDate || getTodayIsoKolkata()) : prev.expiryDate,
-                      }))
-                    }}
-                  >
-                    {membershipPlans.length > 0 ? membershipPlans.map((plan) => (
-                      <option key={plan.id} value={plan.id}>{plan.name} • ₹{Number(plan.price || 0)}</option>
-                    )) : <option value="">Loading plans…</option>}
-                  </select>
-                </label>
-              </div>
-
-              <div className="field-row two-up">
-                <label>
-                  <span>Membership Fee</span>
-                  <input
-                    type="number"
-                    value={memberForm.fee}
-                    onChange={(event) => setMemberForm((prev) => ({ ...prev, fee: event.target.value }))}
-                  />
-                </label>
-                <label>
-                  <span>Payment Method</span>
-                  <select
-                    value={memberForm.paymentMethod}
-                    onChange={(event) => setMemberForm((prev) => ({ ...prev, paymentMethod: event.target.value }))}
-                  >
-                    <option value="cash">Cash</option>
-                    <option value="upi">UPI</option>
-                    <option value="card">Card</option>
-                    <option value="bank_transfer">Bank Transfer</option>
-                  </select>
-                </label>
-              </div>
-
-              <div className="field-row two-up">
-                <label>
-                  <span>Start Date</span>
-                  <input
-                    type="date"
-                    value={toDateInputValue(memberForm.startDate)}
-                    onChange={(event) => {
-                      const nextStartDate = event.target.value || getTodayIsoKolkata()
-                      const selectedMemberPlan = membershipPlans.find((plan) => plan.id === memberForm.planId) || membershipPlans[0] || null
-                      const nextExpiry = selectedMemberPlan ? getPlanExpiryDate(selectedMemberPlan, nextStartDate) : nextStartDate
-                      setMemberForm((prev) => ({ ...prev, startDate: nextStartDate, expiryDate: nextExpiry }))
-                    }}
-                  />
-                </label>
-                <label>
-                  <span>Expiry Date</span>
-                  <input
-                    type="date"
-                    value={toDateInputValue(memberForm.expiryDate)}
-                    readOnly
-                  />
-                </label>
-              </div>
-
-              <div className="photo-upload-field">
-                <label>
-                  <span>Profile Photograph *</span>
-                  <input
-                    type="file"
-                    accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                    onChange={(event) => selectMemberPhoto(event, setMemberPhotoSelection, setMemberPhotoError, pushToast)}
-                  />
-                </label>
-                <p className="field-help">Profile photo is required. JPG, PNG, or WEBP, up to 10 MB.</p>
-                {memberPhotoSelection.previewUrl && (
-                  <div className="photo-preview-row">
-                    <img src={memberPhotoSelection.previewUrl} alt="Selected member profile" />
-                    <span>{memberPhotoSelection.file?.name}</span>
-                  </div>
-                )}
-                {memberPhotoError && <p className="photo-upload-error" role="alert">{memberPhotoError}</p>}
-              </div>
-
-              <div className="button-row right-align">
-                <button type="button" className="ghost-button" onClick={() => setShowAddMember(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="primary-button" disabled={isSubmittingMember || membershipPlans.length === 0}>
-                  {isSubmittingMember ? 'Saving…' : memberPhotoError ? 'Retry Save' : 'Add Member'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <MemberModal
+          memberForm={memberForm}
+          setMemberForm={setMemberForm}
+          membershipPlans={membershipPlans}
+          selectedPlan={selectedPlan}
+          fieldErrors={memberModalErrors}
+          photoSelection={memberPhotoSelection}
+          photoError={memberPhotoError}
+          isSubmitting={isSubmittingMember}
+          onClose={() => setShowAddMember(false)}
+          onSubmit={handleAddMember}
+          onPhotoChange={(event) => selectMemberPhoto(event, setMemberPhotoSelection, setMemberPhotoError, pushToast)}
+          getPlanExpiryDate={getPlanExpiryDate}
+          getTodayIsoKolkata={getTodayIsoKolkata}
+          toDateInputValue={toDateInputValue}
+        />
       )}
 
       {showEditMember && (
-        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowEditMember(false)}>
-          <div className="modal-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop modal-overlay backdrop-blur-sm" onClick={() => setShowEditMember(false)}>
+          <div className="modal-card modal-panel" role="dialog" aria-modal="true" aria-labelledby="edit-member-title" ref={editMemberDialogRef} onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h2>Edit Member</h2>
-              <button type="button" className="close-button" onClick={() => setShowEditMember(false)}>×</button>
+              <h2 id="edit-member-title">Edit Member</h2>
+              <button type="button" className="close-button" onClick={() => setShowEditMember(false)} aria-label="Close dialog">×</button>
             </div>
 
             <form onSubmit={handleEditMember} className="member-form">
@@ -1980,6 +2043,17 @@ function DashboardApp() {
                   onChange={(event) => setEditMemberForm((prev) => ({ ...prev, phone: event.target.value }))}
                   required
                 />
+              </label>
+
+              <label className="whatsapp-consent-field">
+                <input
+                  type="checkbox"
+                  checked={Boolean(editMemberForm.whatsappPassConsent)}
+                  onChange={(event) => setEditMemberForm((prev) => ({ ...prev, whatsappPassConsent: event.target.checked }))}
+                />
+                <span>
+                  I have the member’s permission to send their QR image and membership expiry date to this number.
+                </span>
               </label>
 
               <div className="photo-upload-field">
@@ -2037,11 +2111,11 @@ function DashboardApp() {
       )}
 
       {showWhatsAppActions && (
-        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowWhatsAppActions(false)}>
-          <div className="modal-card small-card whatsapp-actions-modal ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop modal-overlay backdrop-blur-sm" onClick={() => setShowWhatsAppActions(false)}>
+          <div className="modal-card modal-panel small-card whatsapp-actions-modal" role="dialog" aria-modal="true" aria-labelledby="whatsapp-actions-title" ref={whatsappDialogRef} onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h2>WhatsApp</h2>
-              <button type="button" className="close-button" onClick={() => setShowWhatsAppActions(false)}>×</button>
+              <h2 id="whatsapp-actions-title">WhatsApp</h2>
+              <button type="button" className="close-button" onClick={() => setShowWhatsAppActions(false)} aria-label="Close dialog">×</button>
             </div>
             {isCheckingWhatsApp ? (
               <p className="muted-copy">Checking member phone number…</p>
@@ -2072,11 +2146,11 @@ function DashboardApp() {
       )}
 
       {showPaymentModal && (
-        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowPaymentModal(false)}>
-          <div className="modal-card small-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop modal-overlay backdrop-blur-sm" onClick={() => setShowPaymentModal(false)}>
+          <div className="modal-card modal-panel small-card" role="dialog" aria-modal="true" aria-labelledby="record-payment-title" ref={paymentDialogRef} onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h2>Record Payment</h2>
-              <button type="button" className="close-button" onClick={() => setShowPaymentModal(false)}>×</button>
+              <h2 id="record-payment-title">Record Payment</h2>
+              <button type="button" className="close-button" onClick={() => setShowPaymentModal(false)} aria-label="Close dialog">×</button>
             </div>
             <form className="member-form" onSubmit={handleRecordPayment}>
               <label>
@@ -2116,11 +2190,11 @@ function DashboardApp() {
       )}
 
       {showRenewModal && (
-        <div className="modal-backdrop ios-modal-backdrop bg-black/20 backdrop-blur-sm" onClick={() => setShowRenewModal(false)}>
-          <div className="modal-card small-card ios-modal-card bg-white rounded-2xl border border-black/5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop modal-overlay backdrop-blur-sm" onClick={() => setShowRenewModal(false)}>
+          <div className="modal-card modal-panel small-card" role="dialog" aria-modal="true" aria-labelledby="renew-membership-title" ref={renewalDialogRef} onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h2>Renew Membership</h2>
-              <button type="button" className="close-button" onClick={() => setShowRenewModal(false)}>×</button>
+              <h2 id="renew-membership-title">Renew Membership</h2>
+              <button type="button" className="close-button" onClick={() => setShowRenewModal(false)} aria-label="Close dialog">×</button>
             </div>
 
             {renewMemberId && (
@@ -2158,21 +2232,33 @@ function DashboardApp() {
         </div>
       )}
 
-      <FloatingAIChat
-        userName={session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || 'Athlete'}
-      />
       <ToastList toasts={toasts} />
+      <ScrollUtilities />
     </div>
   )
+}
+
+function LegacyExerciseRedirect() {
+  const { id } = useParams()
+  return <Navigate to={`/admin/exercise/${encodeURIComponent(id)}`} replace />
 }
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/library" element={<ExerciseLibrary />} />
-        <Route path="/exercise/:id" element={<ExerciseDetail />} />
-        <Route path="*" element={<DashboardApp />} />
+        <Route path="/" element={<MemberLogin />} />
+        <Route path="/member/*" element={<MemberDashboard />} />
+        <Route path="/admin" element={<DashboardApp />} />
+        <Route path="/admin/exercise/:id" element={<DashboardApp />} />
+        <Route path="/admin/*" element={<DashboardApp />} />
+        <Route path="/library" element={<Navigate to="/admin/library" replace />} />
+        <Route path="/exercise/:id" element={<LegacyExerciseRedirect />} />
+        <Route path="/privacy" element={<PolicyPage />} />
+        <Route path="/terms" element={<PolicyPage />} />
+        <Route path="/cookies" element={<PolicyPage />} />
+        <Route path="/refunds" element={<PolicyPage />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </BrowserRouter>
   )

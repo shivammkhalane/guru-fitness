@@ -225,8 +225,14 @@ export default function CameraQRScanner({ onScan, isActive = true }) {
   useEffect(() => {
     if (!isActive) return undefined
 
-    startScanner(selectedCameraId || undefined)
+    let cancelled = false
+    const timeoutId = window.setTimeout(() => {
+      if (!cancelled) void startScanner(selectedCameraId || undefined)
+    }, 0)
+
     return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
       stopScanner()
     }
   }, [isActive, selectedCameraId, startScanner, stopScanner])
