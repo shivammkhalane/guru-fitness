@@ -28,6 +28,7 @@ import PeakHoursHeatmap from './components/PeakHoursHeatmap'
 import ChurnRadar from './components/ChurnRadar'
 import ExerciseDetail from './pages/ExerciseDetail'
 import ExerciseLibrary from './pages/ExerciseLibrary'
+import LandingPage from './components/LandingPage'
 import PolicyPage from './pages/PolicyPage'
 import NotFoundPage from './pages/NotFoundPage'
 import useQRScanner from './hooks/useQRScanner'
@@ -2247,7 +2248,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<MemberLogin />} />
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/login" element={<MemberLogin />} />
+        <Route path="/app" element={<MemberLogin />} />
         <Route path="/member/*" element={<MemberDashboard />} />
         <Route path="/admin" element={<DashboardApp />} />
         <Route path="/admin/exercise/:id" element={<DashboardApp />} />

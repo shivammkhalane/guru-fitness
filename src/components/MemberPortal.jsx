@@ -452,7 +452,7 @@ export default function MemberPortal({ redirectAfterAuthentication = false }) {
       <main id="main-content" className="member-portal-page">
         <a className="skip-to-content" href="#member-content">Skip to member content</a>
         <section className="member-portal-auth member-portal-card" id="member-content">
-          <a href="/" className="member-portal-brand" aria-label="Guru Fitness home">
+          <a href="/app" className="member-portal-brand" aria-label="Guru Fitness member sign in">
             <span>GF</span>
             <strong>Guru Fitness<small>MEMBER PORTAL</small></strong>
           </a>
