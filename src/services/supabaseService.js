@@ -1,13 +1,22 @@
 import { createClient } from '@supabase/supabase-js'
 
+const normalizeSupabaseProjectUrl = (value) => {
+  const url = new URL(value)
+  url.pathname = url.pathname.replace(/\/rest\/v1\/?$/i, '').replace(/\/+$/, '')
+  url.search = ''
+  url.hash = ''
+  return url.toString().replace(/\/$/, '')
+}
+
 const createSupabaseClient = () => {
-  const url = import.meta.env.VITE_SUPABASE_URL
+  const configuredUrl = import.meta.env.VITE_SUPABASE_URL
   const key = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-  if (!url || !key || url.includes('your-project') || url.includes('replace')) {
+  if (!configuredUrl || !key || configuredUrl.includes('your-project') || configuredUrl.includes('replace')) {
     return null
   }
 
+  const url = normalizeSupabaseProjectUrl(configuredUrl)
   return createClient(url, key, {
     auth: {
       persistSession: true,
