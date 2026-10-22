@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
     Activity,
@@ -37,6 +37,134 @@ function InstagramIcon({ className = 'h-4 w-4' }) {
             <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
             <line x1="17.5" x2="17.51" y1="6.5" y2="6.5" />
         </svg>
+    );
+}
+
+function Reveal({ children, delay = 0, as: Tag = 'section' }) {
+    const ref = useRef(null);
+    const [visible, setVisible] = useState(false);
+
+    useEffect(() => {
+        const node = ref.current;
+        if (!node) return;
+        const observer = new IntersectionObserver(
+            ([entry]) => {
+                if (entry.isIntersecting) {
+                    setVisible(true);
+                    observer.disconnect();
+                }
+            },
+            { threshold: 0.12, rootMargin: '0px 0px -40px 0px' }
+        );
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+
+    return (
+        <Tag
+            ref={ref}
+            className={`transition-all duration-700 ease-out will-change-transform ${
+                visible
+                    ? 'opacity-100 translate-y-0'
+                    : 'opacity-0 translate-y-8'
+            }`}
+            style={{ transitionDelay: `${delay}ms` }}
+        >
+            {children}
+        </Tag>
+    );
+}
+
+function BMICalculator() {
+    const [weight, setWeight] = useState('');
+    const [height, setHeight] = useState('');
+    const [bmi, setBmi] = useState(null);
+
+    const calculateBMI = (e) => {
+        e.preventDefault();
+        const w = Number(weight);
+        const h = Number(height);
+        if (w > 0 && h > 0) {
+            const heightInMeters = h / 100;
+            const bmiValue = (w / (heightInMeters * heightInMeters)).toFixed(1);
+            setBmi(bmiValue);
+        }
+    };
+
+    const getBMIStatus = () => {
+        if (!bmi) return { text: '', color: '' };
+        const n = Number(bmi);
+        if (n < 18.5) return { text: 'Underweight (Time to Bulk)', color: 'text-blue-400' };
+        if (n >= 18.5 && n < 24.9) return { text: 'Normal Weight (Keep Shredding)', color: 'text-emerald-400' };
+        if (n >= 25 && n < 29.9) return { text: "Overweight (Let's Cut)", color: 'text-yellow-400' };
+        return { text: 'Obese (Start Your Journey Today)', color: 'text-red-400' };
+    };
+
+    return (
+        <section className="mx-auto max-w-4xl px-4 py-20">
+            <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-zinc-900/50 p-8 sm:p-12 shadow-[0_0_50px_rgba(0,0,0,0.5)] backdrop-blur-xl">
+                {/* Spotlight accent */}
+                <div
+                    className="pointer-events-none absolute -inset-px rounded-3xl opacity-60 blur-xl transition-opacity duration-500"
+                    style={{
+                        background: 'radial-gradient(60% 40% at 50% 0%, rgba(255,255,255,0.10), transparent 70%)',
+                    }}
+                />
+
+                <div className="relative">
+                    <div className="mb-8 text-center">
+                        <h2 className="text-3xl font-black tracking-tight text-white">Check Your Fitness Baseline</h2>
+                        <p className="mt-2 text-zinc-400">Calculate your BMI to see where your transformation begins.</p>
+                    </div>
+
+                    <form onSubmit={calculateBMI} className="mx-auto max-w-md space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="group">
+                                <label className="mb-1.5 block text-xs font-bold uppercase tracking-widest text-zinc-400">Weight (kg)</label>
+                                <input
+                                    type="number"
+                                    required
+                                    value={weight}
+                                    onChange={(e) => setWeight(e.target.value)}
+                                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-white placeholder-zinc-600 transition-all focus:border-white/30 focus:outline-none focus:ring-1 focus:ring-white/30 focus:shadow-[0_0_25px_rgba(255,255,255,0.06)] group-hover:border-zinc-700"
+                                    placeholder="e.g. 75"
+                                />
+                            </div>
+                            <div className="group">
+                                <label className="mb-1.5 block text-xs font-bold uppercase tracking-widest text-zinc-400">Height (cm)</label>
+                                <input
+                                    type="number"
+                                    required
+                                    value={height}
+                                    onChange={(e) => setHeight(e.target.value)}
+                                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-white placeholder-zinc-600 transition-all focus:border-white/30 focus:outline-none focus:ring-1 focus:ring-white/30 focus:shadow-[0_0_25px_rgba(255,255,255,0.06)] group-hover:border-zinc-700"
+                                    placeholder="e.g. 175"
+                                />
+                            </div>
+                        </div>
+                        <button
+                            type="submit"
+                            className="group relative w-full overflow-hidden rounded-xl bg-white py-3.5 text-sm font-bold text-zinc-950 transition-all hover:bg-zinc-200 hover:scale-[1.02] hover:shadow-[0_0_30px_rgba(255,255,255,0.25)] active:scale-[0.98]"
+                        >
+                            <span className="relative flex items-center justify-center gap-2">
+                                Calculate BMI
+                                <Activity className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+                            </span>
+                        </button>
+                    </form>
+
+                    {bmi && (
+                        <div className="mt-8 animate-in fade-in slide-in-from-bottom-4 duration-500 text-center rounded-2xl border border-zinc-800 bg-zinc-950/70 p-6 backdrop-blur-sm">
+                            <span className="block text-sm font-medium text-zinc-400">Your current BMI is</span>
+                            <span className="my-2 block text-5xl font-black text-white">{bmi}</span>
+                            <span className={`text-sm font-bold uppercase tracking-wider ${getBMIStatus().color}`}>
+                                {getBMIStatus().text}
+                            </span>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </section>
     );
 }
 
@@ -204,6 +332,11 @@ export default function LandingPage() {
                     })}
                 </div>
             </section>
+
+            {/* ===================== BMI Calculator Section ===================== */}
+            <Reveal delay={100} id="bmi">
+                <BMICalculator />
+            </Reveal>
 
             {/* ===================== Testimonials (Marquee) ===================== */}
             <section id="testimonials" className="py-24 overflow-hidden border-t border-zinc-900 mt-20">
