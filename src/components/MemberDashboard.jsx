@@ -12,6 +12,10 @@ import {
   Dumbbell,
   CheckCircle2,
   Sparkles,
+  Calendar,
+  Clock,
+  UserRound,
+  Timer,
 } from 'lucide-react';
 
 function InstagramIcon({ className = 'h-4 w-4' }) {
@@ -63,6 +67,101 @@ function SpotlightCard({ children, className = '', onClick }) {
         }}
       />
       <div className="relative z-10 h-full">{children}</div>
+    </div>
+  );
+}
+
+function MemberCheckIns({ checkIns = 18 }) {
+  const today = new Date();
+  const monthLabel = today.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+
+  const records = [
+    { id: 1, session: 'Morning Push Day', date: today, time: '06:45 AM', duration: '1h 22m', trainer: 'Kushal S.', tag: 'Chest & Triceps' },
+    { id: 2, session: 'Evening Pull Day', date: new Date(today.getTime() - 86400000), time: '07:10 PM', duration: '1h 05m', trainer: 'Kushal S.', tag: 'Back & Biceps' },
+    { id: 3, session: 'Morning Lower Body', date: new Date(today.getTime() - 2 * 86400000), time: '06:30 AM', duration: '1h 30m', trainer: 'Kushal S.', tag: 'Legs & Core' },
+    { id: 4, session: 'Evening Upper Body', date: new Date(today.getTime() - 3 * 86400000), time: '07:00 PM', duration: '1h 18m', trainer: 'Kushal S.', tag: 'Shoulders & Abs' },
+    { id: 5, session: 'Morning Push Day', date: new Date(today.getTime() - 4 * 86400000), time: '06:50 AM', duration: '1h 20m', trainer: 'Kushal S.', tag: 'Chest & Triceps' },
+    { id: 6, session: 'Morning Pull Day', date: new Date(today.getTime() - 5 * 86400000), time: '06:40 AM', duration: '1h 10m', trainer: 'Kushal S.', tag: 'Back & Biceps' },
+  ];
+
+  const monthVisits = records.length;
+
+  const formatDate = (d) =>
+    d.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  const isToday = (d) => d.toDateString() === today.toDateString();
+
+  return (
+    <div className="space-y-5 animate-in fade-in duration-300">
+      <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-zinc-900/80 via-zinc-900/60 to-black/60 p-6 shadow-[0_0_40px_rgba(0,0,0,0.5)] backdrop-blur-xl">
+        <div
+          className="pointer-events-none absolute -inset-px opacity-60 blur-xl"
+          style={{
+            background: 'radial-gradient(60% 40% at 50% 0%, rgba(255,255,255,0.08), transparent 70%)',
+          }}
+        />
+        <div className="relative z-10 flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Total Visits This Month</p>
+            <p className="mt-1 text-4xl font-black tracking-tight text-white">
+              {monthVisits}
+              <span className="ml-2 text-sm font-medium text-zinc-400">check-ins</span>
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">{monthLabel}</p>
+          </div>
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
+            <CheckCircle2 className="h-8 w-8 text-emerald-400" />
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {records.map((rec) => (
+          <SpotlightCard key={rec.id} className="p-4">
+            <div className="flex items-start gap-4">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-zinc-800/80 border border-zinc-700">
+                {isToday(rec.date) ? (
+                  <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                ) : (
+                  <Calendar className="h-5 w-5 text-zinc-400" />
+                )}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="truncate text-sm font-bold text-white">{rec.session}</h4>
+                  {isToday(rec.date) && (
+                    <span className="shrink-0 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-emerald-400 border border-emerald-500/20">
+                      Today
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+                  <span className="inline-flex items-center gap-1">
+                    <Calendar className="h-3 w-3" /> {formatDate(rec.date)}
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="h-3 w-3" /> {rec.time}
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Timer className="h-3 w-3" /> {rec.duration}
+                  </span>
+                </div>
+
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1 rounded-lg bg-zinc-800/60 px-2.5 py-1 text-[10px] font-semibold text-zinc-300 border border-zinc-700/60">
+                    <UserRound className="h-3 w-3" /> {rec.trainer}
+                  </span>
+                  <span className="inline-flex items-center gap-1 rounded-lg bg-zinc-800/60 px-2.5 py-1 text-[10px] font-semibold text-zinc-400 border border-zinc-700/60">
+                    <Dumbbell className="h-3 w-3" /> {rec.tag}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </SpotlightCard>
+        ))}
+      </div>
     </div>
   );
 }
@@ -153,6 +252,7 @@ export default function MemberDashboard() {
   const tabs = [
     { id: 'pass', label: 'Access Pass', icon: QrCode },
     { id: 'workouts', label: 'Workouts', icon: Activity },
+    { id: 'attendance', label: 'History', icon: CheckCircle2 },
     { id: 'gym', label: 'Gym Info', icon: User },
   ];
 
@@ -353,7 +453,12 @@ export default function MemberDashboard() {
           </div>
         )}
 
-        {/* Tab 3: Gym Info */}
+        {/* Tab 3: Check-In History */}
+        {activeTab === 'attendance' && (
+          <MemberCheckIns checkIns={member.checkIns} />
+        )}
+
+        {/* Tab 4: Gym Info */}
         {activeTab === 'gym' && (
           <div className="space-y-4 animate-in fade-in duration-300">
             <SpotlightCard className="overflow-hidden p-0">
