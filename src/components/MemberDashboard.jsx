@@ -1,641 +1,445 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { QRCodeSVG } from 'qrcode.react'
+import React, { useState, useRef, useEffect } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   Activity,
-  ArrowRight,
-  ArrowUpRight,
-  CalendarDays,
-  Check,
-  CheckCircle2,
-  CreditCard,
-  Dumbbell,
-  Flame,
-  LogOut,
+  User,
+  Phone,
   MapPin,
-  MessageCircle,
-  QrCode,
+  LogOut,
+  Flame,
   Scale,
+  QrCode,
+  Dumbbell,
+  CheckCircle2,
   Sparkles,
-  Trophy,
-} from 'lucide-react'
-import { supabase } from '../services/supabaseService'
-import { formatDate, getTodayIsoKolkata } from '../utils/gymLogic'
-import SpotlightCard from './react-bits/SpotlightCard'
-import ShinyText from './react-bits/ShinyText'
+} from 'lucide-react';
 
-const tabs = [
-  { id: 'pass', label: 'Access Pass', icon: CreditCard },
-  { id: 'workouts', label: 'Workouts', icon: Dumbbell },
-  { id: 'gym', label: 'Gym Info', icon: MapPin },
-]
+function InstagramIcon({ className = 'h-4 w-4' }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect width="20" height="20" x="2" y="2" rx="5" ry="5" />
+      <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+      <line x1="17.5" x2="17.51" y1="6.5" y2="6.5" />
+    </svg>
+  );
+}
 
-const workoutSplits = [
+function SpotlightCard({ children, className = '', onClick }) {
+  const divRef = useRef(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [opacity, setOpacity] = useState(0);
+
+  const handleMouseMove = (e) => {
+    if (!divRef.current) return;
+    const rect = divRef.current.getBoundingClientRect();
+    setPosition({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  };
+
+  return (
+    <div
+      ref={divRef}
+      onClick={onClick}
+      onMouseMove={handleMouseMove}
+      onMouseEnter={() => setOpacity(1)}
+      onMouseLeave={() => setOpacity(0)}
+      className={`relative overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900/60 shadow-xl backdrop-blur-xl transition-all duration-300 hover:border-zinc-700 hover:bg-zinc-900/80 ${
+        onClick ? 'cursor-pointer hover:scale-[1.01]' : ''
+      } ${className}`}
+    >
+      <div
+        className="pointer-events-none absolute -inset-px transition-opacity duration-300 z-0"
+        style={{
+          opacity,
+          background: `radial-gradient(500px circle at ${position.x}px ${position.y}px, rgba(255,255,255,0.08), transparent 40%)`,
+        }}
+      />
+      <div className="relative z-10 h-full">{children}</div>
+    </div>
+  );
+}
+
+const workoutCategories = [
   {
-    id: 'push',
-    title: 'Push Day',
-    focus: 'Chest, Shoulders & Triceps',
-    exercises: ['Barbell Bench Press (4x8-10)', 'Incline Dumbbell Press (3x10-12)', 'Overhead Dumbbell Press (3x10)', 'Cable Lateral Raises (4x15)', 'Tricep Rope Pushdowns (3x12)'],
-    description: 'Pressing-focused training designed to build upper body mass and pressing strength.'
+    id: 'chest',
+    name: 'Chest & Triceps',
+    tag: 'Push Day',
+    exercises: [
+      { name: 'Barbell Bench Press', sets: '4 Sets', reps: '8 - 12 Reps', note: 'Focus on controlled eccentric phase' },
+      { name: 'Incline Dumbbell Press', sets: '3 Sets', reps: '10 - 12 Reps', note: 'Squeeze at the top of the movement' },
+      { name: 'Cable Crossovers', sets: '3 Sets', reps: '12 - 15 Reps', note: 'Constant tension on lower chest' },
+      { name: 'Tricep Rope Pushdowns', sets: '3 Sets', reps: '12 - 15 Reps', note: 'Full lockout at the bottom' },
+    ],
   },
   {
-    id: 'pull',
-    title: 'Pull Day',
-    focus: 'Back, Rear Delts & Biceps',
-    exercises: ['Deadlift / Rack Pulls (4x6-8)', 'Lat Pulldowns (4x10-12)', 'Seated Cable Rows (3x10)', 'Face Pulls (4x15)', 'Incline Dumbbell Bicep Curls (3x12)'],
-    description: 'Pulling and posterior chain session for posture, width, and arms.'
+    id: 'back',
+    name: 'Back & Biceps',
+    tag: 'Pull Day',
+    exercises: [
+      { name: 'Lat Pulldowns', sets: '4 Sets', reps: '10 - 12 Reps', note: 'Drive elbows down and back' },
+      { name: 'Seated Cable Rows', sets: '3 Sets', reps: '10 - 12 Reps', note: 'Keep chest upright, minimal swinging' },
+      { name: 'Single-Arm Dumbbell Rows', sets: '3 Sets', reps: '10 Reps / side', note: 'Full stretch at the bottom' },
+      { name: 'Barbell Bicep Curls', sets: '3 Sets', reps: '10 - 12 Reps', note: 'Strict form, no momentum' },
+    ],
   },
   {
     id: 'legs',
-    title: 'Legs & Core',
-    focus: 'Quads, Hamstrings & Abs',
-    exercises: ['Barbell Back Squats (4x8)', 'Leg Press (3x12)', 'Romanian Deadlifts (3x10)', 'Standing Calf Raises (4x15)', 'Hanging Leg Raises (3x15)'],
-    description: 'High-intensity lower-body strength and functional athletic training.'
+    name: 'Legs & Core',
+    tag: 'Lower Body',
+    exercises: [
+      { name: 'Barbell Squats', sets: '4 Sets', reps: '8 - 10 Reps', note: 'Keep core tight, depth parallel' },
+      { name: 'Leg Press', sets: '3 Sets', reps: '12 - 15 Reps', note: 'Foot placement mid-plate' },
+      { name: 'Seated Leg Curls', sets: '3 Sets', reps: '12 - 15 Reps', note: 'Controlled negative' },
+      { name: 'Weighted Planks', sets: '3 Sets', reps: '60 Seconds', note: 'Keep glutes and abs engaged' },
+    ],
   },
-]
-
-const canonicalPhone = (value) => {
-  let digits = String(value || '').replace(/\D/g, '')
-  if (digits.startsWith('0')) digits = digits.slice(1)
-  if (digits.startsWith('91') && digits.length === 12) digits = digits.slice(2)
-  return digits
-}
-
-const getGymContactLinks = () => {
-  const phone = String(import.meta.env.VITE_GYM_WHATSAPP_NUMBER || '919130564188').replace(/\D/g, '')
-  return {
-    whatsappUrl: `https://wa.me/${phone}?text=${encodeURIComponent('Hi Kushal, I need assistance with my Guru Fitness membership.')}`,
-    instagramUrl: 'https://www.instagram.com/guru_fitness_dhule/',
-  }
-}
+  {
+    id: 'shoulders',
+    name: 'Shoulders & Abs',
+    tag: 'Upper Body',
+    exercises: [
+      { name: 'Seated Dumbbell Shoulder Press', sets: '4 Sets', reps: '8 - 10 Reps', note: 'Full range of motion' },
+      { name: 'Dumbbell Lateral Raises', sets: '4 Sets', reps: '15 Reps', note: 'Lead with elbows, light weight' },
+      { name: 'Face Pulls', sets: '3 Sets', reps: '15 Reps', note: 'Target rear delts and external rotation' },
+      { name: 'Hanging Leg Raises', sets: '3 Sets', reps: '12 - 15 Reps', note: 'Avoid swinging' },
+    ],
+  },
+];
 
 export default function MemberDashboard() {
-  const navigate = useNavigate()
-  const [activeTab, setActiveTab] = useState('pass')
-  const [member, setMember] = useState(null)
-  const [membership, setMembership] = useState(null)
-  const [monthlyCheckIns, setMonthlyCheckIns] = useState(0)
-  const [activeWorkout, setActiveWorkout] = useState('push')
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [isSigningOut, setIsSigningOut] = useState(false)
+  const [activeTab, setActiveTab] = useState('pass');
+  const [activeCategory, setActiveCategory] = useState(workoutCategories[0]);
 
-  const loadMember = useCallback(async (user) => {
-    if (!supabase || !user?.id) {
-      // Check for local demo session
-      const demo = localStorage.getItem('guru_member_session')
-      if (demo) {
-        try {
-          const parsed = JSON.parse(demo)
-          setMember({
-            id: 'GF-DEMO-1042',
-            gym_id: 'guru-fitness-dhule',
-            member_code: parsed.member_code || 'GF-1042',
-            full_name: parsed.full_name || 'Rahul Sharma',
-            phone: parsed.phone || '+91 9876543210',
-            status: 'active',
-          })
-          setMembership({
-            id: 'ms-demo-01',
-            expiry_date: parsed.expiry_date || '2026-12-31',
-            status: 'active',
-          })
-          setMonthlyCheckIns(18)
-          setIsLoading(false)
-          return
-        } catch {
-          // fallback
-        }
-      }
-
-      setMember(null)
-      setError('Sign in with your registered member phone number to continue.')
-      setIsLoading(false)
-      return
-    }
-
-    setIsLoading(true)
-    setError('')
+  const [member, setMember] = useState(() => {
     try {
-      const { data: linkedMember, error: memberError } = await supabase
-        .from('members')
-        .select('id, gym_id, member_code, full_name, phone, status, photo_url, auth_user_id')
-        .eq('auth_user_id', user.id)
-        .maybeSingle()
-
-      if (memberError) throw memberError
-      if (!linkedMember || canonicalPhone(linkedMember.phone) !== canonicalPhone(user.phone)) {
-        // Fallback to demo session if exists
-        const demo = localStorage.getItem('guru_member_session')
-        if (demo) {
-          const parsed = JSON.parse(demo)
-          setMember({
-            id: 'GF-DEMO-1042',
-            gym_id: 'guru-fitness-dhule',
-            member_code: parsed.member_code || 'GF-1042',
-            full_name: parsed.full_name || 'Rahul Sharma',
-            phone: parsed.phone || '+91 9876543210',
-            status: 'active',
-          })
-          setMembership({
-            id: 'ms-demo-01',
-            expiry_date: parsed.expiry_date || '2026-12-31',
-            status: 'active',
-          })
-          setMonthlyCheckIns(18)
-          return
-        }
-
-        setMember(null)
-        setError('This account is not linked to a gym member. Contact gym staff for help.')
-        return
+      const saved = localStorage.getItem('guru_member_session');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          id: parsed.member_code || parsed.id || 'GF-1042',
+          name: parsed.full_name || parsed.name || 'Rahul Sharma',
+          status: (parsed.status || 'ACTIVE').toUpperCase(),
+          expiry: parsed.expiry_date || parsed.expiry || '31 Dec 2026',
+          weight: parsed.weight || '72 kg',
+          checkIns: parsed.check_ins || parsed.checkIns || 18,
+        };
       }
-
-      const today = getTodayIsoKolkata()
-      const monthStart = `${today.slice(0, 7)}-01`
-      const [membershipResult, attendanceResult] = await Promise.all([
-        supabase
-          .from('memberships')
-          .select('id, expiry_date, status, created_at')
-          .eq('member_id', linkedMember.id)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-        supabase
-          .from('attendance')
-          .select('id', { count: 'exact', head: true })
-          .eq('member_id', linkedMember.id)
-          .gte('attendance_date', monthStart)
-          .lte('attendance_date', today),
-      ])
-
-      setMember(linkedMember)
-      setMembership(membershipResult.data || { expiry_date: '2026-12-31', status: 'active' })
-      setMonthlyCheckIns(attendanceResult.count || 0)
-    } catch (loadError) {
-      // Check if fallback demo session exists
-      const demo = localStorage.getItem('guru_member_session')
-      if (demo) {
-        const parsed = JSON.parse(demo)
-        setMember({
-          id: 'GF-DEMO-1042',
-          gym_id: 'guru-fitness-dhule',
-          member_code: parsed.member_code || 'GF-1042',
-          full_name: parsed.full_name || 'Rahul Sharma',
-          phone: parsed.phone || '+91 9876543210',
-          status: 'active',
-        })
-        setMembership({
-          id: 'ms-demo-01',
-          expiry_date: parsed.expiry_date || '2026-12-31',
-          status: 'active',
-        })
-        setMonthlyCheckIns(18)
-      } else {
-        setMember(null)
-        setError(loadError instanceof Error ? loadError.message : 'Unable to load your member account.')
-      }
-    } finally {
-      setIsLoading(false)
+    } catch {
+      // fallback
     }
-  }, [])
+    return {
+      id: 'GF-1042',
+      name: 'Rahul Sharma',
+      status: 'ACTIVE',
+      expiry: '31 Dec 2026',
+      weight: '72 kg',
+      checkIns: 18,
+    };
+  });
 
-  useEffect(() => {
-    let cancelled = false
-    const restoreSession = async () => {
-      // Check local storage session first for instant responsiveness
-      const demo = localStorage.getItem('guru_member_session')
-      if (demo) {
-        try {
-          const parsed = JSON.parse(demo)
-          if (!cancelled) {
-            setMember({
-              id: 'GF-DEMO-1042',
-              gym_id: 'guru-fitness-dhule',
-              member_code: parsed.member_code || 'GF-1042',
-              full_name: parsed.full_name || 'Rahul Sharma',
-              phone: parsed.phone || '+91 9876543210',
-              status: 'active',
-            })
-            setMembership({
-              id: 'ms-demo-01',
-              expiry_date: parsed.expiry_date || '2026-12-31',
-              status: 'active',
-            })
-            setMonthlyCheckIns(18)
-            setIsLoading(false)
-          }
-          return
-        } catch {
-          // continue
-        }
-      }
+  const handleLogout = () => {
+    localStorage.removeItem('guru_member_session');
+    window.location.href = '/login';
+  };
 
-      if (!supabase) {
-        if (!cancelled) {
-          setIsLoading(false)
-          setError('Sign in with your registered member phone number to continue.')
-        }
-        return
-      }
-
-      const { data, error: sessionError } = await supabase.auth.getSession()
-      if (cancelled) return
-      if (sessionError || !data.session?.user) {
-        setIsLoading(false)
-        setError('Sign in with your registered member phone number to continue.')
-        return
-      }
-      await loadMember(data.session.user)
-    }
-
-    restoreSession()
-    document.title = 'Member Portal | Guru Fitness'
-
-    if (supabase) {
-      const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-        if (cancelled) return
-        if (event === 'SIGNED_OUT') {
-          localStorage.removeItem('guru_member_session')
-          setMember(null)
-          navigate('/login', { replace: true })
-        } else if (session?.user) {
-          queueMicrotask(() => loadMember(session.user))
-        }
-      })
-      return () => {
-        cancelled = true
-        authListener.subscription.unsubscribe()
-      }
-    }
-  }, [loadMember, navigate])
-
-  const handleSignOut = async () => {
-    setIsSigningOut(true)
-    localStorage.removeItem('guru_member_session')
-    if (supabase) {
-      try {
-        await supabase.auth.signOut()
-      } catch {
-        // ignore
-      }
-    }
-    navigate('/login', { replace: true })
-  }
-
-  if (isLoading) {
-    return (
-      <main className="grid min-h-screen place-items-center bg-zinc-950 px-4 font-sans text-zinc-100">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-10 w-10 animate-spin rounded-full border-2 border-zinc-700 border-t-white" />
-          <p className="text-sm font-medium text-zinc-400">Loading your member pass…</p>
-        </div>
-      </main>
-    )
-  }
-
-  if (!member) {
-    return (
-      <main className="grid min-h-screen place-items-center bg-zinc-950 px-4 py-10 font-sans text-zinc-100">
-        <SpotlightCard className="w-full max-w-md p-8 text-center">
-          <a href="/" className="mb-6 inline-flex items-center gap-3">
-            <span className="grid h-12 w-12 place-items-center rounded-2xl bg-white text-base font-black text-zinc-950 shadow-md">GF</span>
-            <div className="text-left">
-              <strong className="block text-base text-white">Guru Fitness</strong>
-              <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Member Portal</span>
-            </div>
-          </a>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Member Access</h1>
-          <p className="mt-2 text-sm text-zinc-400">{error || 'Please sign in to view your pass and workouts.'}</p>
-          <a
-            className="mt-6 inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-white px-4 text-sm font-bold text-zinc-950 transition-all hover:bg-zinc-200"
-            href="/login"
-          >
-            Sign In with Phone & OTP
-          </a>
-          <a
-            className="mt-4 block text-center text-xs font-medium text-zinc-400 underline underline-offset-4 hover:text-white"
-            href="/admin"
-          >
-            Gym Owner Console →
-          </a>
-        </SpotlightCard>
-      </main>
-    )
-  }
-
-  const today = getTodayIsoKolkata()
-  const isMembershipActive = Boolean(
-    membership &&
-    (membership.expiry_date >= today || membership.status === 'active') &&
-    !['cancelled', 'expired', 'frozen'].includes(String(membership.status || '').toLowerCase())
-  )
-  const { whatsappUrl } = getGymContactLinks()
-  const selectedWorkout = workoutSplits.find((split) => split.id === activeWorkout) || workoutSplits[0]
+  const tabs = [
+    { id: 'pass', label: 'Access Pass', icon: QrCode },
+    { id: 'workouts', label: 'Workouts', icon: Activity },
+    { id: 'gym', label: 'Gym Info', icon: User },
+  ];
 
   return (
-    <div className="min-h-screen bg-zinc-950 pb-28 font-sans text-zinc-100 selection:bg-zinc-800 selection:text-white">
+    <div className="min-h-screen bg-zinc-950 pb-28 text-zinc-50 font-sans selection:bg-zinc-800 selection:text-white md:pb-12">
       {/* Top Navbar */}
-      <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3.5 sm:px-6">
-          <a href="/member" className="flex items-center gap-3">
-            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white text-sm font-black text-zinc-950 shadow-md">
-              GF
-            </span>
-            <div>
-              <strong className="block text-sm font-bold text-white">Guru Fitness</strong>
-              <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                Member Pass • Dhule
-              </span>
-            </div>
-          </a>
+      <header className="sticky top-0 z-50 border-b border-white/5 bg-zinc-950/70 px-4 py-4 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-md md:max-w-4xl items-center justify-between">
           <div className="flex items-center gap-3">
-            <a
-              href="/"
-              className="text-xs font-medium text-zinc-400 hover:text-white transition-colors hidden sm:inline"
-            >
-              Public Site
-            </a>
-            <button
-              type="button"
-              onClick={handleSignOut}
-              disabled={isSigningOut}
-              className="inline-flex min-h-9 shrink-0 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3.5 text-xs font-semibold text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-white"
-            >
-              <LogOut size={14} />
-              <span>{isSigningOut ? 'Signing out…' : 'Sign out'}</span>
-            </button>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-zinc-950 shadow-[0_0_20px_rgba(255,255,255,0.2)] font-black text-sm">
+              GF
+            </div>
+            <div>
+              <h1 className="text-base font-black tracking-tight text-white">Guru Fitness</h1>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Member Portal • Dhule</p>
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={handleLogout}
+            title="Log out of Member Portal"
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-zinc-400 transition-all hover:border-zinc-700 hover:bg-zinc-800 hover:text-white"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
-        {/* Welcome Header */}
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold uppercase tracking-widest text-zinc-400">Active Member</span>
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
-            <h1 className="mt-1 text-2xl font-black tracking-tight text-white sm:text-3xl">
-              Hi, {member.full_name}
-            </h1>
-            <p className="mt-1 text-xs sm:text-sm text-zinc-400 font-mono">
-              Member Code · {member.member_code} • {member.phone}
-            </p>
+      {/* Main Content Area */}
+      <main className="mx-auto max-w-md md:max-w-4xl p-4 space-y-6">
+        {/* Welcome Banner */}
+        <div className="pt-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-widest text-zinc-400">Authenticated Member</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
           </div>
-          <div
-            className={`inline-flex items-center gap-2 rounded-full border px-4 py-1.5 text-xs font-bold uppercase tracking-wider ${
-              isMembershipActive
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.15)]'
-                : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
-            }`}
-          >
-            {isMembershipActive ? <CheckCircle2 size={14} /> : <CalendarDays size={14} />}
-            {isMembershipActive ? 'Membership Active' : 'Renew Needed'}
-          </div>
+          <h2 className="text-3xl font-black tracking-tight text-white mt-1">
+            Hi, {member.name.split(' ')[0]}
+          </h2>
+          <p className="text-sm font-medium text-zinc-400">Welcome to your gym dashboard.</p>
         </div>
 
-        {/* Tab 1: Access Pass (Apple Wallet Style Card) */}
+        {/* Tab 1: Access Pass */}
         {activeTab === 'pass' && (
-          <section className="grid gap-6 md:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]">
-            {/* Apple Wallet Style Digital Pass */}
-            <div className="relative overflow-hidden rounded-3xl border border-zinc-700/80 bg-gradient-to-br from-zinc-900 via-zinc-900 to-black p-1 shadow-2xl backdrop-blur-xl">
-              {/* Glowing decorative gradient strip */}
-              <div className="h-2 w-full rounded-t-3xl bg-gradient-to-r from-zinc-500 via-white to-zinc-500 opacity-80" />
+          <div className="space-y-5">
+            <SpotlightCard className="overflow-hidden p-0 border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.6)]">
+              <div className="absolute inset-0 bg-gradient-to-br from-zinc-800/40 via-zinc-900/60 to-black/80" />
 
-              <div className="p-6 sm:p-8">
-                {/* Card Header */}
-                <div className="flex items-center justify-between border-b border-zinc-800 pb-5">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-zinc-950 font-black text-sm">
-                      GF
-                    </div>
-                    <div>
-                      <h2 className="text-sm font-black uppercase tracking-wider text-white">Guru Fitness Health Club</h2>
-                      <p className="text-[11px] text-zinc-400">Datta Mandir Chowk, Dhule</p>
-                    </div>
-                  </div>
-                  <span className="rounded-full border border-zinc-700 bg-zinc-800/80 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
-                    Wallet Pass
-                  </span>
+              <div className="relative z-10 p-8 text-center">
+                <div className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-400 shadow-sm">
+                  <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                  {member.status}
                 </div>
 
-                {/* QR Code and Member Info */}
-                <div className="my-8 flex flex-col items-center justify-center sm:flex-row sm:gap-8">
-                  {/* Apple Wallet QR Block */}
-                  <div className="relative rounded-2xl bg-white p-4 shadow-[0_0_35px_rgba(255,255,255,0.15)] transition-transform hover:scale-105">
-                    <QRCodeSVG
-                      value={`GURU-MBR-${member.member_code || member.id}`}
-                      size={180}
-                      level="H"
-                      includeMargin={false}
-                      className="h-auto max-w-full"
-                    />
-                    <div className="mt-2 text-center text-[10px] font-bold text-zinc-600 tracking-wider">
-                      SCAN FOR CHECK-IN
-                    </div>
-                  </div>
+                <h3 className="mb-6 text-2xl font-black tracking-tight text-white">GURU FITNESS HEALTH CLUB</h3>
 
-                  {/* Member Details */}
-                  <div className="mt-6 sm:mt-0 text-center sm:text-left space-y-3">
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Cardholder</span>
-                      <h3 className="text-xl font-black text-white">{member.full_name}</h3>
-                    </div>
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Member ID</span>
-                      <p className="font-mono text-base font-bold text-zinc-200">{member.member_code}</p>
-                    </div>
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Valid Until</span>
-                      <p className="text-sm font-bold text-emerald-400">
-                        {membership?.expiry_date ? formatDate(membership.expiry_date) : 'Active Season'}
-                      </p>
-                    </div>
+                {/* Pure Vector SVG QR Code with crisp border */}
+                <div className="mx-auto inline-flex rounded-2xl bg-white p-5 shadow-[0_0_35px_rgba(255,255,255,0.18)] ring-1 ring-white/30 transition-transform hover:scale-105">
+                  <QRCodeSVG
+                    value={`GURU-MBR-${member.id}`}
+                    size={180}
+                    level="H"
+                    includeMargin={false}
+                    className="h-[180px] w-[180px] object-contain"
+                  />
+                </div>
+                <p className="mt-5 font-mono text-xs font-bold tracking-widest text-zinc-400">
+                  CODE · {member.id}
+                </p>
+              </div>
+
+              <div className="relative z-10 border-t border-dashed border-white/10 bg-black/50 p-6 backdrop-blur-md">
+                <div className="flex items-center justify-between text-sm">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Member Name</p>
+                    <p className="font-bold text-white text-base">{member.name}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Valid Until</p>
+                    <p className="font-bold text-emerald-400 text-base">{member.expiry}</p>
                   </div>
                 </div>
+              </div>
+            </SpotlightCard>
 
-                {/* Card Footer */}
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4 text-center">
-                  <p className="text-xs text-zinc-400">
-                    Present this screen to the reception camera or staff for fast check-in.
-                  </p>
+            {/* Quick Metrics */}
+            <div className="grid grid-cols-2 gap-4">
+              <SpotlightCard className="p-5">
+                <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800 text-zinc-200">
+                  <Scale className="h-4 w-4 text-zinc-300" />
                 </div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Current Weight</p>
+                <div className="mt-1">
+                  <span className="text-2xl font-black tracking-tight text-white">{member.weight}</span>
+                </div>
+              </SpotlightCard>
+
+              <SpotlightCard className="p-5">
+                <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800 text-orange-400">
+                  <Flame className="h-4 w-4" />
+                </div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Monthly Visits</p>
+                <div className="mt-1">
+                  <span className="text-2xl font-black tracking-tight text-white">{member.checkIns}</span>
+                  <span className="text-xs text-zinc-400 font-semibold ml-1.5">days</span>
+                </div>
+              </SpotlightCard>
+            </div>
+          </div>
+        )}
+
+        {/* Tab 2: Categorized Workout Splits (Self-Contained) */}
+        {activeTab === 'workouts' && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            {/* Section Header */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h3 className="text-2xl font-black tracking-tight text-white flex items-center gap-2">
+                  <Dumbbell className="text-zinc-400" size={24} /> Categorized Workout Splits
+                </h3>
+                <p className="text-zinc-400 text-xs sm:text-sm mt-0.5">
+                  Custom muscle-group regimens designed for Guru Fitness members.
+                </p>
+              </div>
+              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-300 w-fit">
+                <Flame size={14} className="text-amber-400" /> Curated for Clean Gains
               </div>
             </div>
 
-            {/* Quick Metrics */}
-            <div className="flex flex-col gap-4">
-              <SpotlightCard className="p-6">
-                <div className="flex items-center gap-3 text-zinc-400 mb-2">
-                  <Flame className="h-5 w-5 text-orange-400" />
-                  <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">Monthly Attendance</span>
-                </div>
-                <div className="mt-2 flex items-baseline gap-2">
-                  <span className="text-5xl font-black text-white">{monthlyCheckIns}</span>
-                  <span className="text-xs font-semibold text-zinc-400">Check-ins</span>
-                </div>
-                <p className="mt-2 text-xs text-zinc-400">Target: 22 workouts this month</p>
-                <div className="mt-4 h-2 w-full rounded-full bg-zinc-800 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-300"
-                    style={{ width: `${Math.min(100, (monthlyCheckIns / 22) * 100)}%` }}
-                  />
-                </div>
-              </SpotlightCard>
-
-              <SpotlightCard className="p-6">
-                <div className="flex items-center gap-3 text-zinc-400 mb-2">
-                  <Trophy className="h-5 w-5 text-yellow-400" />
-                  <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">Workout Plan</span>
-                </div>
-                <h4 className="text-lg font-bold text-white mt-1">Push • Pull • Legs</h4>
-                <p className="text-xs text-zinc-400 mt-1">Included with your ₹500/month plan</p>
+            {/* Category Tabs Switcher */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {workoutCategories.map((cat) => (
                 <button
                   type="button"
-                  onClick={() => setActiveTab('workouts')}
-                  className="mt-4 inline-flex items-center gap-2 text-xs font-bold text-white hover:text-zinc-300 transition-colors"
-                >
-                  View Today's Routine <ArrowRight size={14} />
-                </button>
-              </SpotlightCard>
-            </div>
-          </section>
-        )}
-
-        {/* Tab 2: Workouts Tracker */}
-        {activeTab === 'workouts' && (
-          <SpotlightCard className="p-6 sm:p-8">
-            <div className="mb-6">
-              <span className="text-xs font-bold uppercase tracking-widest text-zinc-400">Guru Fitness Split</span>
-              <h2 className="mt-1 text-2xl font-black text-white">Push, Pull, Legs Workout Schedule</h2>
-              <p className="mt-1 text-sm text-zinc-400">Select a split day to view targeted exercises and sets.</p>
-            </div>
-
-            {/* Split Switcher */}
-            <div className="grid gap-3 sm:grid-cols-3 mb-8">
-              {workoutSplits.map((split) => (
-                <button
-                  type="button"
-                  key={split.id}
-                  onClick={() => setActiveWorkout(split.id)}
-                  className={`rounded-2xl border p-4 text-left transition-all ${
-                    activeWorkout === split.id
-                      ? 'border-white bg-white text-zinc-950 shadow-lg scale-[1.02]'
-                      : 'border-zinc-800 bg-zinc-900/60 text-white hover:border-zinc-700 hover:bg-zinc-800'
+                  key={cat.id}
+                  onClick={() => setActiveCategory(cat)}
+                  className={`p-4 rounded-2xl border text-left transition-all duration-300 flex flex-col justify-between ${
+                    activeCategory.id === cat.id
+                      ? 'bg-zinc-100 text-zinc-950 border-zinc-100 shadow-xl font-bold scale-[1.02]'
+                      : 'bg-zinc-900/60 text-zinc-300 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900 font-medium'
                   }`}
                 >
-                  <span className="block text-base font-bold">{split.title}</span>
-                  <span className={`mt-1 block text-xs ${activeWorkout === split.id ? 'text-zinc-700 font-medium' : 'text-zinc-400'}`}>
-                    {split.focus}
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-wider ${
+                      activeCategory.id === cat.id ? 'text-zinc-600' : 'text-zinc-400'
+                    }`}
+                  >
+                    {cat.tag}
                   </span>
+                  <span className="text-sm md:text-base mt-2 font-bold">{cat.name}</span>
                 </button>
               ))}
             </div>
 
-            {/* Exercise List */}
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-6">
-              <div className="flex items-center justify-between border-b border-zinc-800 pb-4 mb-4">
+            {/* Active Exercises List */}
+            <div className="p-6 md:p-8 rounded-3xl bg-zinc-900/80 border border-zinc-800 backdrop-blur-xl shadow-2xl space-y-6">
+              <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
                 <div>
-                  <h3 className="text-lg font-bold text-white">{selectedWorkout.title}</h3>
-                  <p className="text-xs text-zinc-400">{selectedWorkout.description}</p>
+                  <h4 className="text-xl font-black text-white">{activeCategory.name}</h4>
+                  <p className="text-xs text-zinc-400">Perform with proper form and progressive overload.</p>
                 </div>
-                <span className="rounded-full bg-zinc-800 px-3 py-1 text-xs font-bold text-zinc-300">
-                  {selectedWorkout.exercises.length} Exercises
+                <span className="px-3 py-1 rounded-full bg-zinc-800 text-zinc-300 text-xs font-semibold">
+                  {activeCategory.exercises.length} Exercises
                 </span>
               </div>
 
-              <div className="space-y-3">
-                {selectedWorkout.exercises.map((exercise, index) => (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {activeCategory.exercises.map((ex, idx) => (
                   <div
-                    key={index}
-                    className="flex items-center justify-between rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-3.5 hover:border-zinc-700 transition-colors"
+                    key={idx}
+                    className="p-5 rounded-2xl bg-zinc-950/70 border border-zinc-800/80 space-y-3 hover:border-zinc-700 transition"
                   >
-                    <div className="flex items-center gap-3">
-                      <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-zinc-800 text-xs font-bold text-zinc-300">
-                        {index + 1}
-                      </span>
-                      <span className="text-sm font-semibold text-white">{exercise}</span>
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-300 font-bold text-xs">
+                          0{idx + 1}
+                        </div>
+                        <h5 className="font-bold text-zinc-100 text-base">{ex.name}</h5>
+                      </div>
                     </div>
-                    <CheckCircle2 className="h-4 w-4 text-zinc-600 hover:text-emerald-400 cursor-pointer transition-colors" />
+
+                    <div className="flex items-center gap-3 pt-1">
+                      <span className="px-2.5 py-1 rounded-lg bg-zinc-900 text-zinc-300 text-xs font-bold border border-zinc-800">
+                        {ex.sets}
+                      </span>
+                      <span className="px-2.5 py-1 rounded-lg bg-zinc-900 text-zinc-300 text-xs font-bold border border-zinc-800">
+                        {ex.reps}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-zinc-400 italic pt-1 border-t border-zinc-900">
+                      💡 Note: {ex.note}
+                    </p>
                   </div>
                 ))}
               </div>
             </div>
-          </SpotlightCard>
+          </div>
         )}
 
         {/* Tab 3: Gym Info */}
         {activeTab === 'gym' && (
-          <SpotlightCard className="p-6 sm:p-8">
-            <div className="flex items-center gap-4 mb-6">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-zinc-950 font-black text-base shadow-md">
-                GF
-              </div>
-              <div>
-                <h2 className="text-2xl font-black text-white">Guru Fitness Health Club</h2>
-                <p className="text-sm text-zinc-400">Head Coach & Owner: Kushal Solanke</p>
-              </div>
-            </div>
-
-            <div className="grid gap-6 md:grid-cols-2 mt-8">
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-                <div className="flex items-center gap-3 text-red-400 mb-3">
-                  <MapPin size={18} />
-                  <h3 className="text-sm font-bold text-white">Gym Address</h3>
-                </div>
-                <p className="text-sm text-zinc-300 leading-relaxed">
-                  Guru Fitness Health Club,<br />
-                  Datta Mandir Chowk,<br />
-                  Dhule, Maharashtra
-                </p>
+          <div className="space-y-4 animate-in fade-in duration-300">
+            <SpotlightCard className="overflow-hidden p-0">
+              <div className="h-32 bg-zinc-800 bg-[url('/images/owner.jpg'),_url('/996d2593-0390-4e29-80f1-932c54bf779e.jpeg')] bg-cover bg-center">
+                <div className="h-full w-full bg-black/60 backdrop-blur-sm" />
               </div>
 
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-                <div className="flex items-center gap-3 text-emerald-400 mb-3">
-                  <MessageCircle size={18} />
-                  <h3 className="text-sm font-bold text-white">Direct Support</h3>
+              <div className="px-6 pb-6 pt-0">
+                <div className="-mt-12 mb-4 inline-flex h-24 w-24 items-center justify-center rounded-2xl border-4 border-zinc-900 bg-white shadow-xl overflow-hidden">
+                  <img
+                    src="/images/owner.jpg"
+                    onError={(e) => {
+                      e.target.src = '/996d2593-0390-4e29-80f1-932c54bf779e.jpeg';
+                    }}
+                    alt="Kushal Solanke - Owner"
+                    className="h-full w-full object-cover"
+                  />
                 </div>
-                <p className="text-sm text-zinc-300 leading-relaxed mb-4">
-                  Need workout guidance, diet advice, or membership renewal?
-                </p>
-                <a
-                  href={whatsappUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-500/15 px-4 py-2 text-xs font-bold text-emerald-400 hover:bg-emerald-500/25 transition-all"
-                >
-                  <MessageCircle size={14} /> Message Kushal on WhatsApp <ArrowUpRight size={13} />
-                </a>
+
+                <h3 className="text-2xl font-black tracking-tight text-white">Guru Fitness Health Club</h3>
+                <p className="text-sm font-medium text-zinc-400">Head Coach & Owner: Kushal Solanke</p>
+
+                <div className="mt-6 space-y-4 rounded-2xl bg-black/40 p-4 border border-white/5">
+                  <div className="flex items-start gap-3 text-sm text-zinc-300">
+                    <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                    <span>
+                      Guru Fitness Health Club,<br />
+                      Datta Mandir Chowk,<br />
+                      Dhule, Maharashtra
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-6 grid grid-cols-2 gap-3">
+                  <a
+                    href="https://wa.me/919130564188?text=Hi%20Kushal%2C%20I%20am%20a%20Guru%20Fitness%20member."
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center justify-center gap-2 rounded-xl bg-white py-3.5 text-sm font-bold text-zinc-950 transition-all hover:bg-zinc-200"
+                  >
+                    <Phone className="h-4 w-4 text-emerald-600" /> WhatsApp
+                  </a>
+                  <a
+                    href="https://www.instagram.com/guru_fitness_dhule/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800/80 py-3.5 text-sm font-bold text-white transition-all hover:border-pink-500/50 hover:bg-zinc-800"
+                  >
+                    <InstagramIcon className="h-4 w-4 text-pink-400" /> Instagram
+                  </a>
+                </div>
               </div>
-            </div>
-          </SpotlightCard>
+            </SpotlightCard>
+          </div>
         )}
       </main>
 
-      {/* Bottom Floating Navigation Dock */}
-      <nav
-        className="fixed inset-x-3 bottom-4 z-50 mx-auto grid max-w-md grid-cols-3 rounded-2xl border border-zinc-800 bg-zinc-950/90 p-1.5 shadow-[0_10px_30px_rgba(0,0,0,0.8)] backdrop-blur-2xl"
-        aria-label="Member portal navigation"
-      >
-        {tabs.map(({ id, label, icon: Icon }) => (
-          <button
-            type="button"
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={`flex min-h-12 flex-col items-center justify-center gap-1 rounded-xl px-2 text-xs font-bold transition-all ${
-              activeTab === id
-                ? 'bg-white text-zinc-950 shadow-md scale-[1.02]'
-                : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'
-            }`}
-          >
-            <Icon size={16} />
-            <span>{label}</span>
-          </button>
-        ))}
+      {/* Floating Bottom Navigation Bar */}
+      <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/10 bg-zinc-950/80 px-6 pt-3 backdrop-blur-xl md:bottom-6 md:left-1/2 md:right-auto md:w-[420px] md:-translate-x-1/2 md:rounded-3xl md:border md:pb-3 md:shadow-2xl">
+        <div className="flex items-center justify-between">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                type="button"
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`relative flex flex-col items-center gap-1.5 p-2 transition-all duration-300 ${
+                  isActive ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {isActive && (
+                  <span className="absolute -top-3 left-1/2 h-1 w-8 -translate-x-1/2 rounded-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.6)]" />
+                )}
+                <Icon
+                  className={`h-6 w-6 transition-all duration-300 ${
+                    isActive ? 'scale-110 stroke-[2.5px]' : 'scale-100 stroke-2'
+                  }`}
+                />
+                <span className="text-[10px] font-bold uppercase tracking-wider">{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
       </nav>
     </div>
-  )
+  );
 }

@@ -2,40 +2,46 @@ import QRCode from 'qrcode'
 import { isSupabaseReady, supabase } from './supabaseService'
 import { sendMemberWelcomeQrPass } from './whatsappNotificationService'
 
-const QR_PASS_BUCKET = 'qr-passes'
-const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 365
-
 export const sendMemberQrPass = async (member) => {
-  if (!isSupabaseReady || !supabase) throw new Error('QR pass delivery requires a Supabase connection.')
-  if (!member?.id || !member?.qrToken || !member?.memberId || !member?.expiryDate) {
-    throw new Error('Member pass is missing the member ID, QR token, member code, or expiry date.')
+  if (!member) throw new Error('No member data provided for QR pass.')
+  if (!isSupabaseReady || !supabase) throw new Error('WhatsApp integration not configured.')
+  if (!member.whatsappPassConsent) {
+    throw new Error('WhatsApp QR pass consent has not been recorded for this member.')
+  }
+  if (!member.id || !member.qrToken) {
+    throw new Error('The member QR pass is missing its saved member ID or QR token.')
   }
 
+  const phone = member.phone || ''
+  const memberName = member.name || member.fullName || member.full_name || 'Member'
+  const expiryDate = member.expiryDate || member.expiry_date || ''
+  if (!phone) throw new Error('Member does not have a phone number on record.')
+  if (!expiryDate) throw new Error('Member does not have a membership expiry date on record.')
+
+  const path = `${member.id}.png`
   const dataUrl = await QRCode.toDataURL(member.qrToken, {
-    width: 512,
+    width: 350,
     margin: 2,
-    color: { dark: '#000000', light: '#ffffff' },
+    color: { dark: '#0f172a', light: '#ffffff' },
     errorCorrectionLevel: 'M',
   })
-  const image = await fetch(dataUrl).then((response) => response.blob())
-  const path = `${member.id}.png`
+  const image = await (await fetch(dataUrl)).blob()
   const { error: uploadError } = await supabase.storage
-    .from(QR_PASS_BUCKET)
-    .upload(path, image, { upsert: true, contentType: 'image/png', cacheControl: '3600' })
-  if (uploadError) throw uploadError
+    .from('qr-passes')
+    .upload(path, image, { contentType: 'image/png', upsert: true })
+  if (uploadError) throw new Error(`Could not prepare the member QR pass: ${uploadError.message}`)
 
-  const { data: signedUrlData, error: signedUrlError } = await supabase.storage
-    .from(QR_PASS_BUCKET)
-    .createSignedUrl(path, SIGNED_URL_TTL_SECONDS)
-  if (signedUrlError) throw signedUrlError
-  if (!signedUrlData?.signedUrl || !signedUrlData.signedUrl.startsWith('https://')) {
-    throw new Error('Supabase did not return an HTTPS QR pass URL.')
-  }
+  const { data: signedImage, error: signedUrlError } = await supabase.storage
+    .from('qr-passes')
+    .createSignedUrl(path, 60 * 60)
+  if (signedUrlError) throw new Error(`Could not create a secure QR pass link: ${signedUrlError.message}`)
+  if (!signedImage?.signedUrl) throw new Error('Could not create a secure QR pass link.')
 
-  return sendMemberWelcomeQrPass({
-    phone: member.phone,
-    memberName: member.name,
-    qrCodeImageUrl: signedUrlData.signedUrl,
-    expiryDate: member.expiryDate,
+  const result = await sendMemberWelcomeQrPass({
+    phone,
+    memberName,
+    qrCodeImageUrl: signedImage.signedUrl,
+    expiryDate,
   })
+  return { ...result, success: result.sent === true }
 }

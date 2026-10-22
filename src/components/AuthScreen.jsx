@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Eye, EyeOff, LockKeyhole, Mail } from 'lucide-react'
 import { PolicyFooter } from '../pages/PolicyPage'
 
@@ -162,7 +163,7 @@ export default function AuthScreen({
             </div>
           )}
 
-          <a href="/member" className="login-member-portal-link">Member sign-in</a>
+          <Link to="/member" className="login-member-portal-link">Member sign-in</Link>
         </div>
       </section>
       <PolicyFooter />

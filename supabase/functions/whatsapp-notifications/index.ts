@@ -62,6 +62,231 @@ const canonicalPhone = (phoneValue: string, country: string) => {
   return digits
 }
 
+const normalizeLoginPhone = (phoneValue: unknown) => {
+  const digits = typeof phoneValue === 'string' ? phoneValue.replace(/\D/g, '') : ''
+  const nationalNumber = digits.length === 10
+    ? digits
+    : digits.length === 11 && digits.startsWith('0')
+      ? digits.slice(1)
+      : digits.length === 12 && digits.startsWith('91')
+        ? digits.slice(2)
+        : ''
+  return /^[6-9]\d{9}$/.test(nationalNumber) ? `91${nationalNumber}` : ''
+}
+
+const hashLoginOtp = async (salt: string, otp: string) => {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`${salt}:${otp}`),
+  )
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+const matchesLoginOtpHash = (expected: string, actual: string) => {
+  if (expected.length !== actual.length) return false
+  let difference = 0
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= expected.charCodeAt(index) ^ actual.charCodeAt(index)
+  }
+  return difference === 0
+}
+
+const createRandomHex = (byteLength: number) => {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength))
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+const createLoginOtp = () => {
+  const random = crypto.getRandomValues(new Uint32Array(1))[0]
+  return String(100000 + (random % 900000))
+}
+
+type LoginMember = {
+  id: string
+  gym_id: string
+  member_code: string
+  full_name: string
+  phone: string
+  status: string
+}
+
+type MemberLoginLookup = { member: LoginMember; response?: never }
+  | { member?: never; response: Response }
+
+const findMemberForLogin = async (
+  admin: ReturnType<typeof createClient>,
+  phoneValue: unknown,
+): Promise<MemberLoginLookup> => {
+  const normalizedPhone = normalizeLoginPhone(phoneValue)
+  if (!normalizedPhone) {
+    return { response: jsonResponse({ message: 'Enter a valid Indian mobile number.' }, 400) }
+  }
+
+  const { data: candidates, error } = await admin
+    .from('members')
+    .select('id, gym_id, member_code, full_name, phone, status')
+    .ilike('phone', `%${normalizedPhone.slice(-10)}%`)
+    .limit(25)
+  if (error) throw error
+
+  const matches = (candidates || []).filter((candidate) => (
+    canonicalPhone(candidate.phone || '', 'India') === normalizedPhone
+  ))
+  if (!matches.length) {
+    return { response: jsonResponse({ message: 'This phone number is not registered as a member.' }, 404) }
+  }
+  if (matches.length > 1) {
+    return { response: jsonResponse({ message: 'This phone number matches multiple member records. Contact gym staff.' }, 409) }
+  }
+  return { member: matches[0] }
+}
+
+const requestMemberLoginOtp = async (
+  admin: ReturnType<typeof createClient>,
+  requestBody: Record<string, unknown>,
+) => {
+  const lookup = await findMemberForLogin(admin, requestBody.phone)
+  if (!lookup.member) return lookup.response
+  const member = lookup.member
+
+  const providerToken = Deno.env.get('WHATSAPP_ACCESS_TOKEN') || Deno.env.get('WHATSAPP_TOKEN') || ''
+  const phoneNumberId = Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') || Deno.env.get('WHATSAPP_PHONE_ID') || ''
+  const graphVersion = Deno.env.get('WHATSAPP_GRAPH_API_VERSION') || 'v18.0'
+  const templateName = Deno.env.get('WHATSAPP_TEMPLATE_MEMBER_LOGIN_OTP') || 'member_login_otp'
+  const languageCode = Deno.env.get('WHATSAPP_TEMPLATE_LANGUAGE') || 'en'
+  if (!providerToken || !phoneNumberId || !templateName) {
+    return jsonResponse({ message: 'WhatsApp member login is not configured on the server.' }, 503)
+  }
+
+  const { data: existingOtp, error: lookupError } = await admin
+    .from('member_login_otps')
+    .select('last_sent_at')
+    .eq('member_id', member.id)
+    .maybeSingle()
+  if (lookupError) throw lookupError
+  if (existingOtp && Date.now() - new Date(existingOtp.last_sent_at).getTime() < 60_000) {
+    return jsonResponse({ message: 'Please wait a minute before requesting another login code.' }, 429)
+  }
+
+  const otp = createLoginOtp()
+  const salt = createRandomHex(16)
+  const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
+  const { error: saveError } = await admin.from('member_login_otps').upsert({
+    member_id: member.id,
+    otp_hash: await hashLoginOtp(salt, otp),
+    otp_salt: salt,
+    expires_at: expiresAt,
+    attempts: 0,
+    last_sent_at: new Date().toISOString(),
+  }, { onConflict: 'member_id' })
+  if (saveError) throw saveError
+
+  const recipient = toWhatsAppPhone(member.phone, 'India')
+  let response: Response
+  try {
+    response = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${providerToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: recipient,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          components: [{
+            type: 'body',
+            parameters: [{ type: 'text', text: otp }],
+          }],
+        },
+      }),
+    })
+  } catch (error) {
+    const { error: cleanupError } = await admin.from('member_login_otps')
+      .delete()
+      .eq('member_id', member.id)
+      .eq('otp_salt', salt)
+    if (cleanupError) {
+      throw new Error(`WhatsApp OTP request failed and its pending code could not be cleared: ${cleanupError.message}`)
+    }
+    throw error
+  }
+
+  const providerResponse = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const providerMessage = (providerResponse as { error?: { message?: string } })?.error?.message
+      || 'WhatsApp could not accept the login code.'
+    const { error: cleanupError } = await admin.from('member_login_otps')
+      .delete()
+      .eq('member_id', member.id)
+      .eq('otp_salt', salt)
+    if (cleanupError) {
+      throw new Error(`${providerMessage} The pending login code could not be cleared: ${cleanupError.message}`)
+    }
+    return jsonResponse({ message: providerMessage }, 502)
+  }
+
+  return jsonResponse({ sent: true })
+}
+
+const verifyMemberLoginOtp = async (
+  admin: ReturnType<typeof createClient>,
+  requestBody: Record<string, unknown>,
+) => {
+  const otp = typeof requestBody.otp === 'string' ? requestBody.otp.trim() : ''
+  if (!/^\d{6}$/.test(otp)) {
+    return jsonResponse({ message: 'Please enter a valid 6-digit OTP code.' }, 400)
+  }
+
+  const lookup = await findMemberForLogin(admin, requestBody.phone)
+  if (!lookup.member) return lookup.response
+  const member = lookup.member
+  const { data: challenge, error: challengeError } = await admin
+    .from('member_login_otps')
+    .select('otp_hash, otp_salt, expires_at, attempts')
+    .eq('member_id', member.id)
+    .maybeSingle()
+  if (challengeError) throw challengeError
+  if (!challenge || new Date(challenge.expires_at).getTime() <= Date.now() || challenge.attempts >= 5) {
+    if (challenge) {
+      const { error: deleteError } = await admin.from('member_login_otps').delete().eq('member_id', member.id)
+      if (deleteError) throw deleteError
+    }
+    return jsonResponse({ message: 'Invalid or expired OTP code. Request a new code and try again.' }, 401)
+  }
+
+  const { data: attempt, error: attemptError } = await admin
+    .from('member_login_otps')
+    .update({ attempts: challenge.attempts + 1 })
+    .eq('member_id', member.id)
+    .eq('attempts', challenge.attempts)
+    .gt('expires_at', new Date().toISOString())
+    .select('member_id')
+    .maybeSingle()
+  if (attemptError) throw attemptError
+  if (!attempt) {
+    return jsonResponse({ message: 'Invalid or expired OTP code. Request a new code and try again.' }, 401)
+  }
+
+  const submittedHash = await hashLoginOtp(challenge.otp_salt, otp)
+  if (!matchesLoginOtpHash(challenge.otp_hash, submittedHash)) {
+    return jsonResponse({ message: 'Invalid or expired OTP code. Please try again.' }, 401)
+  }
+
+  const { error: deleteError } = await admin.from('member_login_otps').delete().eq('member_id', member.id)
+  if (deleteError) throw deleteError
+  return jsonResponse({
+    verified: true,
+    member: {
+      id: member.id,
+      member_code: member.member_code,
+      full_name: member.full_name,
+      phone: member.phone,
+      status: member.status,
+    },
+  })
+}
+
 const fetchWithMemberPassConsentLock = async (
   admin: ReturnType<typeof createClient>,
   memberId: string,
@@ -109,6 +334,22 @@ Deno.serve(async (request) => {
       return jsonResponse({ configured: false, message: 'WhatsApp integration not configured.' }, 503)
     }
 
+    const requestBody = await request.json().catch(() => null)
+    if (!requestBody || typeof requestBody !== 'object' || Array.isArray(requestBody)) {
+      return jsonResponse({ message: 'Request body must be a valid JSON object.' }, 400)
+    }
+
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+    const publicActions = requestBody as Record<string, unknown>
+    if (publicActions.action === 'request_member_login_otp') {
+      return await requestMemberLoginOtp(admin, publicActions)
+    }
+    if (publicActions.action === 'verify_member_login_otp') {
+      return await verifyMemberLoginOtp(admin, publicActions)
+    }
+
     const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authorization } },
       auth: { persistSession: false, autoRefreshToken: false },
@@ -116,9 +357,6 @@ Deno.serve(async (request) => {
     const { data: userResult, error: authError } = await userClient.auth.getUser()
     if (authError || !userResult.user) return jsonResponse({ message: 'The session is not valid.' }, 401)
 
-    const admin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
     const { data: profile, error: profileError } = await admin
       .from('profiles')
       .select('gym_id, role')
@@ -155,10 +393,6 @@ Deno.serve(async (request) => {
     const baseConfigured = Boolean(providerToken && phoneNumberId && graphVersion)
     const configured = Boolean(baseConfigured && allTemplatesConfigured)
 
-    const requestBody = await request.json().catch(() => null)
-    if (!requestBody || typeof requestBody !== 'object') {
-      return jsonResponse({ message: 'Request body must be a valid JSON object.' }, 400)
-    }
     const { action, memberCode, eventType, streak, qrUrl, expiryDate } = requestBody
     if (action === 'status') return jsonResponse({ configured })
 

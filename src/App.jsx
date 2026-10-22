@@ -36,6 +36,7 @@ import { appConfig } from './config/appConfig'
 import { dataService } from './services/dataService'
 import { isSupportedMemberPhoto, MAX_MEMBER_PHOTO_BYTES } from './services/memberPhotoService'
 import { sendWhatsAppNotification } from './services/whatsappNotificationService'
+import { dispatchExpiryReminders } from './services/whatsappAuthService'
 import { sendMemberQrPass } from './services/qrPassService'
 import {
   getCurrentSession,
@@ -166,7 +167,7 @@ const makeMemberForm = (plan = null) => {
     startDate,
     expiryDate: plan ? getPlanExpiryDate(plan, startDate) : startDate,
     paymentMethod: 'cash',
-    whatsappPassConsent: false,
+    whatsappPassConsent: true,
     photo: '',
   }
 }
@@ -224,6 +225,7 @@ function DashboardApp() {
   const [isSubmittingMember, setIsSubmittingMember] = useState(false)
   const [isSavingMember, setIsSavingMember] = useState(false)
   const [isSendingWhatsAppReminder, setIsSendingWhatsAppReminder] = useState(false)
+  const [isSendingBulkReminders, setIsSendingBulkReminders] = useState(false)
   const [isRenewingMembership, setIsRenewingMembership] = useState(false)
   const [memberPhotoSelection, setMemberPhotoSelection] = useState({ file: null, previewUrl: '' })
   const [editPhotoSelection, setEditPhotoSelection] = useState({ file: null, previewUrl: '' })
@@ -657,12 +659,16 @@ function DashboardApp() {
     }
     setQrPassSendingMemberId(member.memberId)
     try {
-      await sendMemberQrPass(member)
-      if (successMessage) pushToast(successMessage, 'success')
-      return true
+      const res = await sendMemberQrPass(member)
+      if (res && res.success) {
+        pushToast(successMessage || '✅ QR pass delivered via WhatsApp!', 'success')
+        return true
+      } else {
+        throw new Error(res?.message || 'WhatsApp QR pass was not sent.')
+      }
     } catch (error) {
-      console.warn('QR pass delivery failed; member was saved:', error)
-      pushToast('Member saved. QR pass could not be sent.', 'warning')
+      console.error('QR pass delivery failed:', error)
+      pushToast(error instanceof Error ? `WhatsApp pass not sent: ${error.message}` : 'WhatsApp pass was not sent.', 'warning')
       return false
     } finally {
       setQrPassSendingMemberId(null)
@@ -1156,6 +1162,45 @@ function DashboardApp() {
     }
   }
 
+  /**
+   * Scans all active members, finds those expiring within 7 days,
+   * and sends each a WhatsApp expiry reminder via Meta Cloud API.
+   */
+  const handleDispatchExpiryReminders = async (windowDays = 7) => {
+    if (isSendingBulkReminders) return
+    const candidates = members.filter((m) => m.phone && m.expiryDate && m.status !== 'archived')
+    if (!candidates.length) {
+      pushToast('No active members with a phone number found.', 'warning')
+      return
+    }
+    setIsSendingBulkReminders(true)
+    pushToast(`Scanning ${candidates.length} members for upcoming expiries…`, 'info')
+    try {
+      const summary = await dispatchExpiryReminders(
+        candidates.map((m) => ({
+          memberCode: m.memberCode || m.memberId,
+          name: m.name,
+          expiryDate: m.expiryDate,
+        })),
+        windowDays,
+      )
+      if (summary.sent === 0 && summary.failed === 0) {
+        pushToast(`No members expire within ${windowDays} days — no reminders sent.`, 'info')
+      } else if (summary.failed > 0) {
+        pushToast(
+          `Reminders: ${summary.sent} sent, ${summary.failed} failed, ${summary.skipped} skipped.`,
+          summary.sent > 0 ? 'warning' : 'warning',
+        )
+      } else {
+        pushToast(`✅ ${summary.sent} expiry reminder${summary.sent === 1 ? '' : 's'} sent successfully!`, 'success')
+      }
+    } catch (err) {
+      pushToast(err.message || 'Bulk reminder dispatch failed.', 'warning')
+    } finally {
+      setIsSendingBulkReminders(false)
+    }
+  }
+
   const openPaymentModal = () => {
     setPaymentForm({ memberCode: selectedMember?.memberId || '', amount: '', paymentMethod: 'cash', paymentDate: getTodayIsoKolkata(), notes: '' })
     setShowPaymentModal(true)
@@ -1483,6 +1528,15 @@ function DashboardApp() {
             </button>
             <button type="button" className="secondary-button" onClick={openWhatsAppActions}>
               WhatsApp
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              title={`Send expiry reminders to all members expiring within 7 days`}
+              disabled={isSendingBulkReminders}
+              onClick={() => void handleDispatchExpiryReminders(7)}
+            >
+              {isSendingBulkReminders ? 'Sending reminders…' : '📣 Send Expiry Reminders'}
             </button>
             <button type="button" className="secondary-button" onClick={handleArchiveMember}>
               Archive
@@ -2250,9 +2304,11 @@ export default function App() {
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<MemberLogin />} />
+        <Route path="/member-login" element={<MemberLogin />} />
         <Route path="/app" element={<MemberLogin />} />
         <Route path="/member/*" element={<MemberDashboard />} />
         <Route path="/admin" element={<DashboardApp />} />
+        <Route path="/owner" element={<DashboardApp />} />
         <Route path="/admin/exercise/:id" element={<DashboardApp />} />
         <Route path="/admin/*" element={<DashboardApp />} />
         <Route path="/library" element={<Navigate to="/admin/library" replace />} />

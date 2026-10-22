@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
     Activity,
     ArrowRight,
@@ -475,12 +476,12 @@ export default function LandingPage() {
                                 <InstagramIcon className="h-3.5 w-3.5" />
                                 <span>Instagram</span>
                             </a>
-                            <a href="/login" className="font-medium text-zinc-400 hover:text-white transition-colors">
+                            <Link to="/login" className="font-medium text-zinc-400 hover:text-white transition-colors">
                                 Member Portal
-                            </a>
-                            <a href="/admin" className="font-medium text-zinc-400 hover:text-white transition-colors">
-                                Gym Owner Login
-                            </a>
+                            </Link>
+                            <Link to="/admin" className="font-medium text-zinc-400 hover:text-white transition-colors">
+                                 Gym Owner Login
+                             </Link>
                             <a href="/privacy" className="font-medium text-zinc-400 hover:text-white transition-colors">
                                 Privacy
                             </a>

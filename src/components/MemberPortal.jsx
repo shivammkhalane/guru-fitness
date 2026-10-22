@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Activity, Apple, CalendarDays, CheckCircle2, Clock3, Dumbbell, LogOut, LockKeyhole, LoaderCircle, Phone, RefreshCw, Utensils } from 'lucide-react'
 import { isSupabaseReady, supabase } from '../services/supabaseService'
 import { formatCurrency, formatDate, getDaysUntilExpiry, getTodayIsoKolkata } from '../utils/gymLogic'
@@ -503,7 +503,7 @@ export default function MemberPortal({ redirectAfterAuthentication = false }) {
           )}
 
           {error && <p className="member-portal-error" role="alert">{error}</p>}
-          <a href="/admin" className="member-portal-back-link">Gym Owner? Access Admin Dashboard</a>
+          <Link to="/admin" className="member-portal-back-link">Gym Owner? Access Admin Dashboard</Link>
         </section>
         <PolicyFooter />
       </main>

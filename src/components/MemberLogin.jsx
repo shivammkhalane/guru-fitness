@@ -1,188 +1,173 @@
 import React, { useState } from 'react';
-import {
-  Smartphone,
-  ArrowRight,
-  ShieldCheck,
-  Key,
-  Loader2,
-  QrCode
-} from 'lucide-react';
-import SpotlightCard from './react-bits/SpotlightCard';
+import { Link, useNavigate } from 'react-router-dom';
+import { Shield, ArrowRight, CheckCircle2, Dumbbell, RefreshCw } from 'lucide-react';
+import { checkMemberAndSendOTP, verifyWhatsAppOTP } from '../services/whatsappAuthService';
 
 export default function MemberLogin() {
-  const [step, setStep] = useState('phone');
+  const navigate = useNavigate();
+  const [step, setStep] = useState(1); // 1: Enter Phone, 2: Enter WhatsApp OTP
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [memberName, setMemberName] = useState('');
+  const [otpInfo, setOtpInfo] = useState(null);
 
-  const handleSendOtp = (e) => {
-    e.preventDefault();
-    if (phone.length < 10) return;
+  const handleSendOTP = async (e) => {
+    if (e) e.preventDefault();
+    const cleanDigits = phone.replace(/\D/g, '');
+    if (cleanDigits.length < 10) {
+      setError('Please enter a valid 10-digit mobile number.');
+      return;
+    }
+    setLoading(true);
+    setError('');
 
-    setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      setStep('otp');
-    }, 800);
+    const res = await checkMemberAndSendOTP(phone);
+    setLoading(false);
+
+    if (res.success) {
+      setOtp('');
+      setMemberName(res.memberName || 'Member');
+      setOtpInfo(res);
+      setStep(2);
+    } else {
+      setError(res.message || 'Could not verify phone number.');
+    }
   };
 
-  const handleVerifyOtp = (e) => {
+  const handleVerifyOTP = async (e) => {
     e.preventDefault();
-    if (otp.length < 6) return;
+    if (otp.length !== 6) {
+      setError('Please enter the 6-digit OTP code.');
+      return;
+    }
+    setLoading(true);
+    setError('');
 
-    setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      // Store session for instant access
-      localStorage.setItem(
-        'guru_member_session',
-        JSON.stringify({
-          member_code: 'GF-1042',
-          full_name: 'Member (Rahul Sharma)',
-          phone: `+91 ${phone}`,
-          status: 'active',
-          expiry_date: '2026-12-31',
-        })
-      );
-      window.location.href = '/member';
-    }, 1000);
+    const res = await verifyWhatsAppOTP(phone, otp);
+    setLoading(false);
+
+    if (res.success) {
+      localStorage.setItem('guru_member_session', JSON.stringify(res.member));
+      navigate('/member');
+    } else {
+      setError(res.message);
+    }
   };
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-zinc-950 p-4 text-zinc-50 font-sans selection:bg-zinc-800 selection:text-white">
-      {/* Background radial glow */}
-      <div className="absolute inset-0 z-0 flex items-center justify-center">
-        <div className="h-[40vh] w-[40vw] rounded-full bg-zinc-800/20 blur-[130px]" />
-      </div>
+    <div className="min-h-screen bg-zinc-950 text-zinc-50 flex items-center justify-center p-6 font-sans">
+      <div className="w-full max-w-md p-8 rounded-3xl bg-zinc-900 border border-zinc-800 shadow-2xl space-y-8">
 
-      <div className="relative z-10 w-full max-w-md">
-        <div className="mb-8 flex flex-col items-center justify-center text-center">
-          <a href="/" className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-white text-zinc-950 shadow-[0_0_30px_rgba(255,255,255,0.25)] transition-transform hover:scale-105">
-            <QrCode className="h-7 w-7" />
-          </a>
+        {/* Header */}
+        <div className="text-center space-y-3">
+          <div className="w-14 h-14 rounded-2xl bg-zinc-800 border border-zinc-700 flex items-center justify-center mx-auto text-white shadow-xl">
+            <Dumbbell size={28} className="text-zinc-100" />
+          </div>
           <h1 className="text-3xl font-black tracking-tight text-white">Member Portal</h1>
-          <p className="mt-1.5 text-sm text-zinc-400">Guru Fitness Health Club • Dhule</p>
+          <p className="text-zinc-300 text-sm font-medium">Guru Fitness Health Club, Dhule</p>
         </div>
 
-        <SpotlightCard className="p-8">
-          {step === 'phone' && (
-            <div>
-              <div className="mb-6 flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-800/70 text-white">
-                  <Smartphone className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-white">Welcome Back</h2>
-                  <p className="text-xs text-zinc-400">Enter your registered mobile number</p>
-                </div>
+        {step === 1 ? (
+          <form onSubmit={handleSendOTP} className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-zinc-300 block">Registered Mobile Number</label>
+              <div className="relative flex items-center">
+                <input
+                  type="tel"
+                  maxLength="15"
+                  placeholder="e.g. 9823039257 or 8788873330"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value.replace(/\D/g, ''))}
+                  className="w-full bg-zinc-950 border border-zinc-700 rounded-2xl py-4 px-4 text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-400 transition font-semibold text-lg"
+                  required
+                  autoFocus
+                />
+              </div>
+              <p className="text-xs text-zinc-400 pt-1 font-medium">We verify your registered membership and dispatch your OTP via WhatsApp.</p>
+            </div>
+
+            {error && (
+              <div className="p-4 rounded-xl bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium leading-relaxed">
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-4 rounded-2xl bg-zinc-100 hover:bg-white text-zinc-950 font-extrabold text-base transition flex items-center justify-center gap-2 shadow-xl disabled:opacity-50"
+            >
+              {loading ? 'Sending WhatsApp OTP...' : 'Get WhatsApp OTP'} <ArrowRight size={18} />
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyOTP} className="space-y-6">
+            <div className="space-y-3 text-center">
+              <div className="text-sm font-bold text-zinc-200">
+                Welcome, <span className="text-white font-black">{memberName}</span>!
               </div>
 
-              <form onSubmit={handleSendOtp} className="space-y-6">
-                <div className="space-y-2">
-                  <label htmlFor="phone" className="text-xs font-bold uppercase tracking-wider text-zinc-400">
-                    Phone Number
-                  </label>
-                  <div className="relative flex items-center">
-                    <span className="absolute left-4 font-bold text-zinc-400">+91</span>
-                    <input
-                      id="phone"
-                      type="tel"
-                      maxLength={10}
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, ''))}
-                      placeholder="98765 43210"
-                      className="w-full rounded-xl border border-zinc-800 bg-zinc-900/60 py-3.5 pl-14 pr-4 font-mono text-lg font-bold text-white placeholder-zinc-700 outline-none transition-colors focus:border-zinc-500 focus:bg-zinc-900"
-                      autoFocus
-                    />
-                  </div>
+              {otpInfo?.apiDelivered && (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-950 border border-emerald-800 text-emerald-300 text-xs font-bold mb-1">
+                  <CheckCircle2 size={14} /> Login code sent to {phone} on WhatsApp
                 </div>
+              )}
 
-                <button
-                  type="submit"
-                  disabled={phone.length < 10 || isLoading}
-                  className="group flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3.5 font-bold text-zinc-950 transition-all hover:bg-zinc-200 disabled:opacity-50"
-                >
-                  {isLoading ? (
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                  ) : (
-                    <>
-                      Send OTP{' '}
-                      <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
-                    </>
-                  )}
-                </button>
-              </form>
+              <label className="text-xs font-bold uppercase tracking-wider text-zinc-300 block pt-2">Enter 6-Digit OTP</label>
+
+              <input
+                type="text"
+                maxLength="6"
+                placeholder="••••••"
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                className="w-full bg-zinc-950 border border-zinc-700 rounded-2xl py-4 text-center tracking-[0.75em] text-3xl font-black text-white placeholder-zinc-700 focus:outline-none focus:border-zinc-400 transition"
+                required
+                autoFocus
+              />
             </div>
-          )}
 
-          {step === 'otp' && (
-            <div>
-              <div className="mb-6 flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-800/70 text-white">
-                  <ShieldCheck className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-white">Verify OTP</h2>
-                  <p className="text-xs text-zinc-400">Sent to +91 {phone}</p>
-                </div>
+            {error && (
+              <div className="p-4 rounded-xl bg-red-950/80 border border-red-800 text-red-200 text-xs font-medium text-center">
+                {error}
               </div>
+            )}
 
-              <form onSubmit={handleVerifyOtp} className="space-y-6">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label htmlFor="otp" className="text-xs font-bold uppercase tracking-wider text-zinc-400">
-                      6-Digit OTP
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setStep('phone')}
-                      className="text-xs font-medium text-zinc-400 hover:text-white"
-                    >
-                      Change Number
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <Key className="absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-zinc-500" />
-                    <input
-                      id="otp"
-                      type="text"
-                      maxLength={6}
-                      value={otp}
-                      onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                      placeholder="••••••"
-                      className="w-full rounded-xl border border-zinc-800 bg-zinc-900/60 py-3.5 pl-12 pr-4 font-mono text-2xl font-bold tracking-[0.4em] text-white placeholder-zinc-700 outline-none transition-colors focus:border-zinc-500 focus:bg-zinc-900 text-center"
-                      autoFocus
-                    />
-                  </div>
-                </div>
+            <button
+              type="submit"
+              disabled={loading || otp.length !== 6}
+              className="w-full py-4 rounded-2xl bg-zinc-100 hover:bg-white text-zinc-950 font-extrabold text-base transition flex items-center justify-center gap-2 shadow-xl disabled:opacity-50"
+            >
+              {loading ? 'Verifying...' : 'Verify & Enter Portal'} <Shield size={18} />
+            </button>
 
-                <button
-                  type="submit"
-                  disabled={otp.length < 6 || isLoading}
-                  className="group flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3.5 font-bold text-zinc-950 transition-all hover:bg-zinc-200 disabled:opacity-50"
-                >
-                  {isLoading ? (
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                  ) : (
-                    <>
-                      Verify & Open Pass{' '}
-                      <QrCode className="h-4 w-4 transition-transform group-hover:scale-110" />
-                    </>
-                  )}
-                </button>
-              </form>
+            <div className="flex items-center justify-between text-xs pt-1">
+              <button
+                type="button"
+                onClick={() => setStep(1)}
+                className="text-zinc-400 hover:text-zinc-200 font-medium transition"
+              >
+                ← Different number
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSendOTP()}
+                disabled={loading}
+                className="text-zinc-400 hover:text-white font-medium flex items-center gap-1 transition disabled:opacity-50"
+              >
+                <RefreshCw size={12} /> Resend OTP
+              </button>
             </div>
-          )}
-        </SpotlightCard>
+          </form>
+        )}
 
-        <div className="mt-8 flex items-center justify-between text-xs text-zinc-400">
-          <a href="/" className="font-medium hover:text-white transition-colors">
-            ← Back to Homepage
-          </a>
-          <a href="/admin" className="font-medium hover:text-white transition-colors">
-            Gym Owner Console →
-          </a>
+        <div className="text-center pt-4 border-t border-zinc-800">
+          <Link to="/" className="text-xs text-zinc-400 hover:text-zinc-200 font-medium transition">← Back to Home</Link>
         </div>
+
       </div>
     </div>
   );
