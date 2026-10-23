@@ -15,10 +15,15 @@ const invokeMemberAuth = async (body) => {
 }
 
 export async function checkMemberAndSendOTP(phoneNumber) {
+  // Generate a random 6-digit OTP locally so the edge function can
+  // validate and deliver it via WhatsApp.
+  const generatedOtp = String(Math.floor(100000 + Math.random() * 900000))
+
   try {
     const result = await invokeMemberAuth({
       action: 'request_member_login_otp',
       phone: phoneNumber,
+      otp: generatedOtp,
     })
     if (!result?.sent) {
       return { success: false, message: result?.message || 'WhatsApp could not accept the login code.' }
