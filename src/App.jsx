@@ -26,6 +26,8 @@ import MemberDashboard from './components/MemberDashboard'
 import GymLeaderboard from './components/GymLeaderboard'
 import PeakHoursHeatmap from './components/PeakHoursHeatmap'
 import PeakHoursHeatmapGrid from './components/PeakHoursHeatmapGrid'
+import MemberRetentionRadial from './components/MemberRetentionRadial'
+import EquipmentStatusSparklines from './components/EquipmentStatusSparklines'
 import ChurnRadar from './components/ChurnRadar'
 import ExerciseDetail from './pages/ExerciseDetail'
 import ExerciseLibrary from './pages/ExerciseLibrary'
@@ -1545,6 +1547,11 @@ function DashboardApp() {
         </section>
 
         <PeakHoursHeatmapGrid />
+
+        <section className="admin-dashboard-widgets grid grid-cols-1 md:grid-cols-2 gap-6">
+          <MemberRetentionRadial />
+          <EquipmentStatusSparklines />
+        </section>
 
         <section className="admin-dashboard-overview">
           <article className="admin-glass-panel revenue-overview">
