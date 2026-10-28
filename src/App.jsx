@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
-import { Activity, ArrowUpRight, CalendarCheck2, CalendarDays, CheckCircle2, CircleDollarSign, CreditCard, LoaderCircle, ScanLine, UserRoundPlus, WalletCards, X, XCircle } from 'lucide-react'
+import { ArrowUpRight, CalendarDays, CheckCircle2, CreditCard, LayoutDashboard, LoaderCircle, LogOut, ScanLine, Settings2, UserRoundPlus, UsersRound, WalletCards, X, XCircle } from 'lucide-react'
 import './App.css'
 import './zinc-theme.css'
 import Sidebar from './components/Sidebar'
@@ -25,6 +25,7 @@ import MemberLogin from './components/MemberLogin'
 import MemberDashboard from './components/MemberDashboard'
 import GymLeaderboard from './components/GymLeaderboard'
 import PeakHoursHeatmap from './components/PeakHoursHeatmap'
+import PeakHoursHeatmapGrid from './components/PeakHoursHeatmapGrid'
 import ChurnRadar from './components/ChurnRadar'
 import ExerciseDetail from './pages/ExerciseDetail'
 import ExerciseLibrary from './pages/ExerciseLibrary'
@@ -38,6 +39,12 @@ import { isSupportedMemberPhoto, MAX_MEMBER_PHOTO_BYTES } from './services/membe
 import { sendWhatsAppNotification } from './services/whatsappNotificationService'
 import { dispatchExpiryReminders } from './services/whatsappAuthService'
 import { sendMemberQrPass } from './services/qrPassService'
+import { animate, stagger } from 'animejs'
+import { curveLinear } from '@visx/curve'
+import { AreaChart, Area } from './components/charts/area-chart'
+import { Grid } from './components/charts/grid'
+import { ChartTooltip } from './components/charts/tooltip/chart-tooltip'
+import { XAxis } from './components/charts/x-axis'
 import {
   getCurrentSession,
   isSupabaseReady,
@@ -63,6 +70,198 @@ const QRCodeCard = lazy(() => import('./components/QRCodeCard'))
 
 const MEMBER_PAGE_SIZE = 24
 const PAYMENT_PAGE_SIZE = 50
+
+function formatMetricCount(value, currency) {
+  return currency
+    ? formatCurrency(Math.round(value))
+    : Math.round(value).toLocaleString('en-IN')
+}
+
+function DashboardMetricCard({ label, countTo, detail, accent = false, currency = false }) {
+  const countRef = useRef(null)
+
+  useEffect(() => {
+    if (countTo == null || !countRef.current) return undefined
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      countRef.current.textContent = formatMetricCount(countTo, currency)
+      return undefined
+    }
+
+    const counter = { value: 0 }
+    const animation = animate(counter, {
+      value: countTo,
+      duration: 900,
+      ease: 'outExpo',
+      onUpdate: () => {
+        if (countRef.current) {
+          countRef.current.textContent = formatMetricCount(counter.value, currency)
+        }
+      },
+    })
+
+    return () => animation.cancel()
+  }, [countTo, currency])
+
+  const setSpotlightPosition = (event) => {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    event.currentTarget.style.setProperty('--spotlight-x', `${event.clientX - bounds.left}px`)
+    event.currentTarget.style.setProperty('--spotlight-y', `${event.clientY - bounds.top}px`)
+  }
+
+  return (
+    <article
+      className={`admin-metric-card${accent ? ' admin-metric-card-accent' : ''}`}
+      onMouseMove={setSpotlightPosition}
+    >
+      <span className="admin-metric-label">{label}</span>
+      <strong ref={countRef}>{countTo == null ? '—' : formatMetricCount(countTo, currency)}</strong>
+      <small>{detail}</small>
+    </article>
+  )
+}
+
+function DashboardQuickActions({ onOpenAddMember, onNavigate, onOpenPayment }) {
+  const actionsRef = useRef(null)
+
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined
+
+    const paths = actionsRef.current?.querySelectorAll('svg path')
+    if (!paths?.length) return undefined
+
+    const animations = Array.from(paths, (path, index) => {
+      if (typeof path.getTotalLength !== 'function') return null
+      const length = path.getTotalLength()
+      path.style.strokeDasharray = `${length}`
+      path.style.strokeDashoffset = `${length}`
+      return animate(path, {
+        strokeDashoffset: [length, 0],
+        duration: 560,
+        delay: index * 35,
+        ease: 'outExpo',
+      })
+    }).filter(Boolean)
+
+    return () => animations.forEach((animation) => animation.cancel())
+  }, [])
+
+  return (
+    <nav ref={actionsRef} className="admin-quick-actions" aria-label="Quick actions">
+      <button type="button" onClick={onOpenAddMember}>
+        <UserRoundPlus size={17} /> <span>Add Member</span>
+      </button>
+      <button type="button" onClick={() => onNavigate('attendance')}>
+        <ScanLine size={17} /> <span>Scan QR</span>
+      </button>
+      <button type="button" onClick={onOpenPayment}>
+        <CreditCard size={17} /> <span>Record Payment</span>
+      </button>
+    </nav>
+  )
+}
+
+function DashboardRevenueChart({ weeklyRevenue, revenueDateRange }) {
+  const chartRef = useRef(null)
+  const chartData = useMemo(
+    () => weeklyRevenue.map((day) => ({
+      date: new Date(`${day.date}T00:00:00.000Z`),
+      revenue: day.amount,
+    })),
+    [weeklyRevenue],
+  )
+  const dateLabels = useMemo(() => weeklyRevenue.map((day) => day.label), [weeklyRevenue])
+
+  useEffect(() => {
+    if (!chartRef.current || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined
+
+    const animation = animate(chartRef.current, {
+      opacity: [0, 1],
+      translateY: [15, 0],
+      duration: 800,
+      ease: 'outExpo',
+    })
+    return () => animation.cancel()
+  }, [])
+
+  return (
+    <div
+      ref={chartRef}
+      className="revenue-chart"
+      role="img"
+      aria-label={`Paid revenue from ${revenueDateRange.start} through ${revenueDateRange.end}`}
+    >
+      {chartData.length ? (
+        <AreaChart
+          data={chartData}
+          xDataKey="date"
+          className="revenue-area-chart"
+          margin={{ top: 12, right: 40, bottom: 28, left: 40 }}
+          style={{ height: 190, touchAction: 'pan-y' }}
+          animationDuration={800}
+        >
+          <Grid horizontal numTicksRows={4} stroke="var(--chart-grid)" strokeOpacity={0.7} />
+          <Area
+            dataKey="revenue"
+            curve={curveLinear}
+            fill="var(--chart-line-primary)"
+            stroke="var(--chart-line-primary)"
+            fillOpacity={0.14}
+            gradientToOpacity={0}
+          />
+          <XAxis labels={dateLabels} numTicks={5} />
+          <ChartTooltip
+            dateLabels={dateLabels}
+            rows={(point) => [{
+              color: 'var(--chart-line-primary)',
+              label: 'Paid revenue',
+              value: formatCurrency(point.revenue),
+            }]}
+          />
+        </AreaChart>
+      ) : (
+        <p className="dashboard-empty">Choose a valid date range.</p>
+      )}
+    </div>
+  )
+}
+
+function DashboardActivityFeed({ attendance, members }) {
+  const listRef = useRef(null)
+
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined
+
+    const items = listRef.current?.querySelectorAll('.activity-item')
+    if (!items?.length) return undefined
+
+    const animation = animate(items, {
+      translateY: [20, 0],
+      opacity: [0, 1],
+      delay: stagger(100),
+      duration: 700,
+      ease: 'outExpo',
+    })
+    return () => animation.cancel()
+  }, [attendance])
+
+  if (!attendance.length) return <p className="dashboard-empty">No check-ins recorded today.</p>
+
+  return (
+    <ul className="admin-activity-list" ref={listRef}>
+      {attendance.slice(0, 5).map((person) => {
+        const member = members.find((entry) => displayMemberCode(entry) === String(person.memberId))
+        return (
+          <li className="admin-activity-row activity-item" key={`${person.memberId}-${person.time}`}>
+            <Avatar name={person.name} small />
+            <div className="dashboard-row-main"><strong>{person.name}</strong><span>{member?.plan || '—'}</span></div>
+            <span className="recent-checkin-time">{person.time}</span>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
 
 const navItems = [
   { key: 'dashboard', label: 'Dashboard' },
@@ -1277,97 +1476,108 @@ function DashboardApp() {
 
   const renderDashboard = ({ onOpenAddMember, onNavigate }) => {
     const todayLabel = new Intl.DateTimeFormat('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' }).format(dashboardClock)
-    const revenuePeak = Math.max(1, ...weeklyRevenue.map((day) => day.amount))
     const recentPayments = payments.slice(0, 5)
 
     return (
-      <div className="page-shell dashboard-page">
-        <div className="mode-banner dashboard-mode-banner">
-          {!isSupabaseReady && <span className="demo-badge">Demo data</span>}
-          {appConfig.isMockMode ? 'Development mock mode' : 'Production mode • Connected services'}
-        </div>
-
-        <header className="dashboard-header">
-          <div>
-            <p className="dashboard-greeting">{settings.gymName || 'Gym overview'}</p>
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Gym overview</h1>
-            <p className="dashboard-date"><CalendarDays size={15} /> {todayLabel}</p>
+      <div className="admin-dashboard">
+        <header className="admin-dashboard-topbar">
+          <div className="admin-dashboard-brand">
+            <span className="admin-dashboard-mark" aria-hidden="true">GF</span>
+            <div>
+              <strong>Guru Fitness</strong>
+              <small>Admin console</small>
+            </div>
           </div>
-          <div className="dashboard-actions">
-            <button type="button" className="btn-primary" onClick={onOpenAddMember}><UserRoundPlus size={16} /> Add Member</button>
-            <button type="button" className="btn-outline" onClick={() => onNavigate('attendance')}><ScanLine className="text-muted-foreground" size={16} /> Record attendance</button>
-            <button type="button" className="btn-outline" onClick={openPaymentModal}><CreditCard className="text-muted-foreground" size={16} /> Record payment</button>
+          <GlobalSearch
+            navItems={visibleNavItems}
+            members={visibleMembers}
+            onNavigate={onNavigate}
+            onSelectMember={selectMember}
+          />
+          <div className="admin-dashboard-account">
+            <ThemeToggle />
+            <details className="admin-profile-menu">
+              <summary aria-label="Open account menu">
+                <span className="admin-profile-avatar">{(session?.user?.email || 'GF').slice(0, 1).toUpperCase()}</span>
+                <span className="admin-profile-copy">
+                  <strong>{session?.user?.email || 'Demo session'}</strong>
+                  <small>{userRole === 'demo' ? 'Local session' : userRole || 'Gym account'}</small>
+                </span>
+                <ArrowUpRight size={15} aria-hidden="true" />
+              </summary>
+              <div className="admin-profile-dropdown">
+                <span>{session?.user?.email || 'Demo session'}</span>
+                <small>{userRole === 'demo' ? 'Local session' : userRole || 'Gym account'}</small>
+                <button type="button" onClick={handleLogout}><LogOut size={15} /> Sign out</button>
+              </div>
+            </details>
           </div>
         </header>
 
-        <section className="dashboard-kpis" aria-label="Gym performance">
-          <article className="dashboard-kpi card">
-            <div className="kpi-heading"><span>Total Revenue</span><CircleDollarSign className="text-muted-foreground" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-foreground">{ledgerSummary ? formatCurrency(ledgerSummary.revenueCollected) : '—'}</strong>
-            <small>Today: {formatCurrency(todayRevenue)}</small>
-          </article>
-          <article className="dashboard-kpi card">
-            <div className="kpi-heading"><span>Active Members</span><Activity className="text-muted-foreground" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-foreground">{summary.activeMembers.toLocaleString('en-IN')}</strong>
-            <small>Membership active today</small>
-          </article>
-          <article className="dashboard-kpi card">
-            <div className="kpi-heading"><span>Check-ins Today</span><CalendarCheck2 className="text-muted-foreground" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-foreground">{summary.todayAttendanceCount.toLocaleString('en-IN')}</strong>
-            <small>Check-ins recorded today</small>
-          </article>
-          <article className="dashboard-kpi card">
-            <div className="kpi-heading"><span>Expiring Soon</span><CalendarDays className="text-muted-foreground" size={18} /></div>
-            <strong className="text-3xl font-semibold tracking-tight text-foreground">{summary.expiringSoonCount.toLocaleString('en-IN')}</strong>
-            <small>Memberships nearing expiry</small>
-          </article>
+        <div className="admin-dashboard-content">
+        <div className="admin-dashboard-status">
+          {!isSupabaseReady && <span className="demo-badge">Demo data</span>}
+          <span>{!isSupabaseReady || appConfig.isMockMode ? 'Local demo mode' : 'Production mode · Connected services'}</span>
+        </div>
+
+        <section className="admin-dashboard-heading">
+          <div>
+            <p className="admin-dashboard-eyebrow">{settings.gymName || 'Guru Fitness Health Club'}</p>
+            <h1>Gym overview</h1>
+            <p><CalendarDays size={15} /> {todayLabel}</p>
+          </div>
         </section>
 
-        <section className="dashboard-overview-grid">
-          <article className="dashboard-panel revenue-overview card">
-            <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Revenue</p><h2 className="text-foreground font-semibold">Revenue by day</h2></div>
-              <strong className="revenue-total">{formatCurrency(weeklyRevenue.reduce((total, day) => total + day.amount, 0))}</strong>
+        <DashboardQuickActions
+          onOpenAddMember={onOpenAddMember}
+          onNavigate={onNavigate}
+          onOpenPayment={openPaymentModal}
+        />
+
+        <section
+          className="admin-dashboard-metrics"
+          aria-label="Gym performance"
+        >
+          <DashboardMetricCard label="Total members" countTo={visibleMembers.length} detail={`${summary.activeMembers.toLocaleString('en-IN')} active today`} />
+          <DashboardMetricCard label="Today's check-ins" countTo={summary.todayAttendanceCount} detail="Recorded so far today" accent />
+          <DashboardMetricCard label="Revenue collected" countTo={ledgerSummary?.revenueCollected ?? null} currency detail={`Today: ${formatCurrency(todayRevenue)}`} />
+          <DashboardMetricCard label="Pending renewals" countTo={summary.expiringSoonCount} detail="Memberships nearing expiry" />
+        </section>
+
+        <PeakHoursHeatmapGrid />
+
+        <section className="admin-dashboard-overview">
+          <article className="admin-glass-panel revenue-overview">
+            <div className="admin-panel-heading">
+              <div className="admin-revenue-heading">
+                <div><p className="admin-panel-kicker">Revenue</p><h2>Revenue by day</h2></div>
+                <strong className="revenue-total">{formatCurrency(weeklyRevenue.reduce((total, day) => total + day.amount, 0))}</strong>
+              </div>
               <div className="revenue-date-range">
                 <label>From <input className="input" type="date" value={revenueDateRange.start} max={revenueDateRange.end || todayIso} onChange={(event) => setRevenueDateRange((previous) => ({ ...previous, start: event.target.value }))} /></label>
                 <label>To <input className="input" type="date" value={revenueDateRange.end} min={revenueDateRange.start} max={todayIso} onChange={(event) => setRevenueDateRange((previous) => ({ ...previous, end: event.target.value }))} /></label>
               </div>
             </div>
-            <div className="revenue-chart" role="img" aria-label={`Paid revenue from ${revenueDateRange.start} through ${revenueDateRange.end}`}>
-              {weeklyRevenue.map((day) => (
-                <div className="revenue-day" key={day.date} title={`${day.label}: ${formatCurrency(day.amount)}`}>
-                  <span>{day.amount ? formatCurrency(day.amount) : '—'}</span>
-                  <div className="revenue-bar-track"><i style={{ height: `${Math.max(4, (day.amount / revenuePeak) * 100)}%` }} /></div>
-                  <small>{day.label}</small>
-                </div>
-              ))}
-              {!weeklyRevenue.length && <p className="dashboard-empty">Choose a valid date range.</p>}
-            </div>
+            <DashboardRevenueChart
+              weeklyRevenue={weeklyRevenue}
+              revenueDateRange={revenueDateRange}
+            />
           </article>
 
-          <article className="dashboard-panel attendance-overview card">
-            <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Today</p><h2 className="text-foreground font-semibold">Recent check-ins</h2></div>
-              <button type="button" className="text-action" onClick={() => onNavigate('attendance')}>View all <ArrowUpRight size={15} /></button>
+          <article className="admin-glass-panel attendance-overview">
+            <div className="admin-panel-heading">
+              <div><p className="admin-panel-kicker">Today</p><h2>Recent check-ins</h2></div>
+              <button type="button" className="admin-text-action" onClick={() => onNavigate('attendance')}>View all <ArrowUpRight size={15} /></button>
             </div>
-            {todayAttendance.length ? todayAttendance.slice(0, 5).map((person) => {
-              const member = visibleMembers.find((entry) => displayMemberCode(entry) === String(person.memberId))
-              return (
-                <div className="recent-checkin-row" key={`${person.memberId}-${person.time}`}>
-                  <Avatar name={person.name} small />
-                  <div className="dashboard-row-main"><strong>{person.name}</strong><span>{member?.plan || '—'}</span></div>
-                  <span className="recent-checkin-time">{person.time}</span>
-                </div>
-              )
-            }) : <p className="dashboard-empty">No check-ins recorded today.</p>}
+            <DashboardActivityFeed attendance={todayAttendance} members={visibleMembers} />
           </article>
         </section>
 
-        <section className="dashboard-lower-grid">
-          <article className="dashboard-panel expiring-overview card">
-            <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Membership health</p><h2 className="text-foreground font-semibold">Expiring soon</h2></div>
-              <button type="button" className="text-action" onClick={() => { setMemberFilter('Expiring Soon'); setMembersPage(1); onNavigate('members') }}>View all <ArrowUpRight size={15} /></button>
+        <section className="admin-dashboard-lower">
+          <article className="admin-glass-panel expiring-overview">
+            <div className="admin-panel-heading">
+              <div><p className="admin-panel-kicker">Membership health</p><h2>Expiring soon</h2></div>
+              <button type="button" className="admin-text-action" onClick={() => { setMemberFilter('Expiring Soon'); setMembersPage(1); onNavigate('members') }}>View all <ArrowUpRight size={15} /></button>
             </div>
             {expiringSoon.length ? expiringSoon.slice(0, 3).map((member) => (
               <div className="expiring-member-row" key={member.memberId}>
@@ -1379,13 +1589,13 @@ function DashboardApp() {
             )) : <p className="dashboard-empty">No memberships are expiring soon.</p>}
           </article>
 
-          <article className="dashboard-panel payments-overview card">
-            <div className="dashboard-panel-heading">
-              <div><p className="section-kicker">Cash flow</p><h2 className="text-foreground font-semibold">Recent payments</h2></div>
-              <button type="button" className="text-action" onClick={() => onNavigate('payments')}>View all <ArrowUpRight size={15} /></button>
+          <article className="admin-glass-panel payments-overview">
+            <div className="admin-panel-heading">
+              <div><p className="admin-panel-kicker">Cash flow</p><h2>Recent payments</h2></div>
+              <button type="button" className="admin-text-action" onClick={() => onNavigate('payments')}>View all <ArrowUpRight size={15} /></button>
             </div>
-            {recentPayments.length ? recentPayments.map((payment) => (
-              <div className="payment-overview-row" key={payment.id || `${payment.receiptNumber}-${payment.date}`}>
+            {recentPayments.length ? recentPayments.map((payment, index) => (
+              <div className="payment-overview-row" key={payment.id || `${payment.receiptNumber || payment.memberId || payment.member || 'payment'}-${payment.date || 'undated'}-${index}`}>
                 <div className="payment-mark"><WalletCards className="text-muted-foreground" size={17} /></div>
                 <div className="dashboard-row-main"><strong>{payment.member}</strong><span>{payment.method}</span></div>
                 <div className="payment-amount"><strong>{formatCurrency(payment.amount)}</strong><span>{formatDate(payment.date)}</span></div>
@@ -1394,11 +1604,12 @@ function DashboardApp() {
           </article>
         </section>
 
-        <section className="dashboard-analytics-grid" aria-label="Attendance analytics">
+        <section className="admin-dashboard-analytics" aria-label="Attendance analytics">
           <GymLeaderboard members={activeMembers} />
           <PeakHoursHeatmap attendance={todayAttendance} />
           {['owner', 'admin'].includes(userRole) && <ChurnRadar />}
         </section>
+      </div>
       </div>
     )
   }
@@ -1961,7 +2172,7 @@ function DashboardApp() {
   }
 
   return (
-    <div className={`app-shell ios-light-shell flex h-screen bg-background text-foreground overflow-hidden${mobileNavOpen ? ' mobile-nav-open' : ''}`}>
+    <div className={`app-shell ios-light-shell flex h-screen bg-background text-foreground overflow-hidden admin-app-shell${mobileNavOpen ? ' mobile-nav-open' : ''}${currentView === 'dashboard' ? ' admin-dashboard-shell' : ''}`}>
         <a className="skip-to-content" href="#main-content">Skip to main content</a>
         <Sidebar
           navItems={visibleNavItems}
@@ -1976,12 +2187,14 @@ function DashboardApp() {
     />
 
     <main className="main-panel flex-1 min-w-0" id="main-content" tabIndex="-1">
-        <GlobalSearch
-          navItems={visibleNavItems}
-          members={visibleMembers}
-          onNavigate={setActiveTab}
-          onSelectMember={selectMember}
-        />
+        {currentView !== 'dashboard' && (
+          <GlobalSearch
+            navItems={visibleNavItems}
+            members={visibleMembers}
+            onNavigate={setActiveTab}
+            onSelectMember={selectMember}
+          />
+        )}
         {!isSupabaseReady && (
           <div className="demo-data-notice" role="note">
             Demonstration data only — examples are stored in this browser and are not live gym records.
@@ -2010,6 +2223,20 @@ function DashboardApp() {
           renderPage()
         )}
       </main>
+
+      <nav className={`admin-mobile-nav${visibleNavItems.some((item) => item.key === 'settings') ? '' : ' admin-mobile-nav-limited'}`} aria-label="Mobile admin navigation">
+        <button type="button" aria-current={activeTab === 'dashboard' ? 'page' : undefined} onClick={() => setActiveTab('dashboard')}>
+          <LayoutDashboard size={19} /><span>Dashboard</span>
+        </button>
+        <button type="button" aria-current={activeTab === 'members' ? 'page' : undefined} onClick={() => setActiveTab('members')}>
+          <UsersRound size={19} /><span>Members</span>
+        </button>
+        {visibleNavItems.some((item) => item.key === 'settings') && (
+          <button type="button" aria-current={activeTab === 'settings' ? 'page' : undefined} onClick={() => setActiveTab('settings')}>
+            <Settings2 size={19} /><span>Settings</span>
+          </button>
+        )}
+      </nav>
 
       {scanResult && (
         <div className={`kiosk-scan-backdrop kiosk-scan-${scanResult.status}`} role="presentation">

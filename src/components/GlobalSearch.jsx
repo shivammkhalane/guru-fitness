@@ -7,6 +7,7 @@ export default function GlobalSearch({ navItems, members, onNavigate, onSelectMe
   const [activeIndex, setActiveIndex] = useState(0)
   const listId = useId()
   const wrapperRef = useRef(null)
+  const inputRef = useRef(null)
 
   const results = useMemo(() => {
     const term = query.trim().toLowerCase()
@@ -33,6 +34,19 @@ export default function GlobalSearch({ navItems, members, onNavigate, onSelectMe
     }
     document.addEventListener('pointerdown', handleOutsideClick)
     return () => document.removeEventListener('pointerdown', handleOutsideClick)
+  }, [])
+
+  useEffect(() => {
+    const handleShortcut = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        inputRef.current?.focus()
+        setIsOpen(true)
+      }
+    }
+
+    document.addEventListener('keydown', handleShortcut)
+    return () => document.removeEventListener('keydown', handleShortcut)
   }, [])
 
   const selectResult = (result) => {
@@ -68,10 +82,12 @@ export default function GlobalSearch({ navItems, members, onNavigate, onSelectMe
     <div className="global-search" ref={wrapperRef}>
       <Search size={17} aria-hidden="true" />
       <input
+        ref={inputRef}
         type="search"
         value={query}
         placeholder="Search pages and members"
         aria-label="Search pages and members"
+        aria-keyshortcuts="Meta+K Control+K"
         aria-autocomplete="list"
         aria-controls={listId}
         aria-expanded={isOpen && results.length > 0}
@@ -83,6 +99,7 @@ export default function GlobalSearch({ navItems, members, onNavigate, onSelectMe
         onFocus={() => setIsOpen(true)}
         onKeyDown={handleKeyDown}
       />
+      <kbd className="global-search-shortcut" aria-hidden="true">⌘ K</kbd>
       {isOpen && query.trim() && (
         <div className="global-search-results" id={listId} role="listbox" aria-label="Search results">
           {results.length ? results.map((result, index) => (
