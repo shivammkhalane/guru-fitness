@@ -39,6 +39,8 @@ import NotFoundPage from './pages/NotFoundPage'
 import KioskMode from './pages/KioskMode'
 import SpotlightSearch from './components/apple/SpotlightSearch'
 import BentoGridDashboard from './components/apple/BentoGridDashboard'
+import KokonutGlassCard from './components/apple/KokonutGlassCard'
+import LivingAnalyticsGrid from './components/apple/LivingAnalyticsGrid'
 import useQRScanner from './hooks/useQRScanner'
 import { appConfig } from './config/appConfig'
 import { dataService } from './services/dataService'
@@ -1606,6 +1608,8 @@ function DashboardApp() {
             <WhatsAppAutomationHub />
             <PTTrainerCommissionTracker />
           </section>
+
+          <LivingAnalyticsGrid />
 
           <section className="admin-dashboard-overview">
             <article className="admin-glass-panel attendance-overview w-full">
