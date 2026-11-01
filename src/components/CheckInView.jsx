@@ -109,9 +109,31 @@ export default function CheckInView({
       <div className="checkin-layout">
         <div className="checkin-input-panel panel-card">
           <form onSubmit={handleUsbScanSubmit} className="usb-scanner-form" style={{ marginBottom: '1rem' }}>
-            <label className="checkin-code-label" htmlFor="usb-scanner-input">
-              USB QR Scanner
-            </label>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+              <label className="checkin-code-label" htmlFor="usb-scanner-input" style={{ marginBottom: 0 }}>
+                USB QR Scanner
+              </label>
+              <a
+                href="/kiosk"
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.35rem',
+                  padding: '0.25rem 0.6rem',
+                  borderRadius: '0.5rem',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                  background: 'var(--muted, #27272a)',
+                  color: 'var(--foreground, #fff)',
+                  textDecoration: 'none',
+                  border: '1px solid var(--border, rgba(255,255,255,0.1))'
+                }}
+              >
+                ⚡ Launch Fullscreen Kiosk
+              </a>
+            </div>
             <input
               id="usb-scanner-input"
               ref={usbScannerRef}

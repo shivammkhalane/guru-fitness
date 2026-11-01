@@ -6,7 +6,14 @@ const invokeMemberAuth = async (body) => {
     throw new Error('Member sign-in is not configured. Contact gym staff for assistance.')
   }
 
-  const { data, error } = await supabase.functions.invoke('whatsapp-notifications', { body })
+  const session = await supabase.auth.getSession().catch(() => null)
+  const token = session?.data?.session?.access_token || supabase.supabaseKey
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+
+  const { data, error } = await supabase.functions.invoke('whatsapp-notifications', {
+    body,
+    headers,
+  })
   if (error) {
     const message = await readWhatsAppFunctionError(error)
     throw new Error(message || 'WhatsApp verification could not be completed. Please try again.')
@@ -15,24 +22,19 @@ const invokeMemberAuth = async (body) => {
 }
 
 export async function checkMemberAndSendOTP(phoneNumber) {
-  // Generate a random 6-digit OTP locally so the edge function can
-  // validate and deliver it via WhatsApp.
-  const generatedOtp = String(Math.floor(100000 + Math.random() * 900000))
-
   try {
     const result = await invokeMemberAuth({
       action: 'request_member_login_otp',
       phone: phoneNumber,
-      otp: generatedOtp,
     })
-    if (!result?.sent) {
+    if (!result?.sent && !result?.success) {
       return { success: false, message: result?.message || 'WhatsApp could not accept the login code.' }
     }
     return {
       success: true,
       apiDelivered: true,
-      memberName: 'Member',
-      message: 'Login code sent to your WhatsApp.',
+      memberName: result?.memberName || 'Member',
+      message: result?.message || 'Login code sent to your WhatsApp.',
     }
   } catch (error) {
     console.error('OTP Dispatch Error:', error)
@@ -55,7 +57,7 @@ export async function verifyWhatsAppOTP(phoneNumber, enteredOtp) {
       phone: phoneNumber,
       otp: code,
     })
-    if (!result?.verified || !result.member) {
+    if ((!result?.verified && !result?.success) || !result.member) {
       return { success: false, message: result?.message || 'Invalid or expired OTP code. Please try again.' }
     }
     return { success: true, member: result.member }

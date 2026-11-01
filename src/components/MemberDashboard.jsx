@@ -16,7 +16,9 @@ import {
   Clock,
   UserRound,
   Timer,
+  Utensils,
 } from 'lucide-react';
+import MemberNutritionHub from './MemberNutritionHub';
 
 function InstagramIcon({ className = 'h-4 w-4' }) {
   return (
@@ -252,6 +254,7 @@ export default function MemberDashboard() {
   const tabs = [
     { id: 'pass', label: 'Access Pass', icon: QrCode },
     { id: 'workouts', label: 'Workouts', icon: Activity },
+    { id: 'nutrition', label: 'Nutrition', icon: Utensils },
     { id: 'attendance', label: 'History', icon: CheckCircle2 },
     { id: 'gym', label: 'Gym Info', icon: User },
   ];
@@ -361,6 +364,9 @@ export default function MemberDashboard() {
                 </div>
               </SpotlightCard>
             </div>
+
+            {/* Daily Nutrition & Hydration Glance */}
+            <MemberNutritionHub />
           </div>
         )}
 
@@ -453,12 +459,27 @@ export default function MemberDashboard() {
           </div>
         )}
 
-        {/* Tab 3: Check-In History */}
+        {/* Tab 3: Member Nutrition Hub */}
+        {activeTab === 'nutrition' && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div>
+              <h3 className="text-2xl font-black tracking-tight text-white flex items-center gap-2">
+                <Utensils className="text-emerald-400" size={24} /> Daily Nutrition & Macros
+              </h3>
+              <p className="text-zinc-400 text-xs sm:text-sm mt-0.5">
+                Surplus macros, liquid hydration logs, and 2-meal intermittent fasting protocol.
+              </p>
+            </div>
+            <MemberNutritionHub />
+          </div>
+        )}
+
+        {/* Tab 4: Check-In History */}
         {activeTab === 'attendance' && (
           <MemberCheckIns checkIns={member.checkIns} />
         )}
 
-        {/* Tab 4: Gym Info */}
+        {/* Tab 5: Gym Info */}
         {activeTab === 'gym' && (
           <div className="space-y-4 animate-in fade-in duration-300">
             <SpotlightCard className="overflow-hidden p-0">

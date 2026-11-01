@@ -182,9 +182,9 @@ const requestMemberLoginOtp = async (
   if (saveError) throw saveError
 
   const recipient = toWhatsAppPhone(member.phone, 'India')
-  let response: Response
-  try {
-    response = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
+
+  const sendMetaMessage = async (components: Array<Record<string, unknown>>) => {
+    return await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${providerToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -194,13 +194,62 @@ const requestMemberLoginOtp = async (
         template: {
           name: templateName,
           language: { code: languageCode },
-          components: [{
-            type: 'body',
-            parameters: [{ type: 'text', text: otp }],
-          }],
+          components,
         },
       }),
     })
+  }
+
+  let response: Response
+  let providerResponse: Record<string, unknown> = {}
+  try {
+    // 1. Meta Authentication templates (e.g. member_login_otp) with URL button
+    response = await sendMetaMessage([
+      {
+        type: 'body',
+        parameters: [{ type: 'text', text: otp }],
+      },
+      {
+        type: 'button',
+        sub_type: 'url',
+        index: '0',
+        parameters: [{ type: 'text', text: otp }],
+      },
+    ])
+    providerResponse = await response.json().catch(() => ({}))
+
+    // 2. If rejected due to button configuration mismatch, inspect details and adapt
+    if (!response.ok) {
+      const errDetail = String(
+        (providerResponse as { error?: { error_data?: { details?: string }; message?: string } })?.error?.error_data?.details
+        || (providerResponse as { error?: { message?: string } })?.error?.message
+        || ''
+      )
+
+      if (errDetail.includes('copy_code') || errDetail.includes('coupon_code')) {
+        response = await sendMetaMessage([
+          {
+            type: 'body',
+            parameters: [{ type: 'text', text: otp }],
+          },
+          {
+            type: 'button',
+            sub_type: 'copy_code',
+            index: '0',
+            parameters: [{ type: 'coupon_code', coupon_code: otp }],
+          },
+        ])
+        providerResponse = await response.json().catch(() => ({}))
+      } else if (errDetail.includes('does not have buttons') || errDetail.includes('Button at index') || errDetail.includes('missing')) {
+        response = await sendMetaMessage([
+          {
+            type: 'body',
+            parameters: [{ type: 'text', text: otp }],
+          },
+        ])
+        providerResponse = await response.json().catch(() => ({}))
+      }
+    }
   } catch (error) {
     const { error: cleanupError } = await admin.from('member_login_otps')
       .delete()
@@ -212,7 +261,6 @@ const requestMemberLoginOtp = async (
     throw error
   }
 
-  const providerResponse = await response.json().catch(() => ({}))
   if (!response.ok) {
     const providerMessage = (providerResponse as { error?: { message?: string } })?.error?.message
       || 'WhatsApp could not accept the login code.'
@@ -223,10 +271,19 @@ const requestMemberLoginOtp = async (
     if (cleanupError) {
       throw new Error(`${providerMessage} The pending login code could not be cleared: ${cleanupError.message}`)
     }
-    return jsonResponse({ message: providerMessage }, 502)
+    return jsonResponse({
+      sent: false,
+      success: false,
+      message: providerMessage,
+    }, 502)
   }
 
-  return jsonResponse({ sent: true })
+  return jsonResponse({
+    sent: true,
+    success: true,
+    memberName: member.full_name,
+    message: 'Login code sent to your WhatsApp.',
+  })
 }
 
 const verifyMemberLoginOtp = async (
@@ -275,14 +332,25 @@ const verifyMemberLoginOtp = async (
 
   const { error: deleteError } = await admin.from('member_login_otps').delete().eq('member_id', member.id)
   if (deleteError) throw deleteError
+
+  const { data: membership } = await admin
+    .from('memberships')
+    .select('expiry_date')
+    .eq('member_id', member.id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
   return jsonResponse({
     verified: true,
+    success: true,
     member: {
       id: member.id,
       member_code: member.member_code,
       full_name: member.full_name,
       phone: member.phone,
       status: member.status,
+      expiry_date: membership?.expiry_date || null,
     },
   })
 }
@@ -324,14 +392,20 @@ Deno.serve(async (request) => {
   if (request.method !== 'POST') return jsonResponse({ message: 'Method not allowed.' }, 405)
 
   try {
-    const authorization = request.headers.get('Authorization')
-    if (!authorization?.startsWith('Bearer ')) return jsonResponse({ message: 'Authentication is required.' }, 401)
-
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || ''
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || ''
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
     if (!supabaseUrl || !anonKey || !serviceRoleKey) {
       return jsonResponse({ configured: false, message: 'WhatsApp integration not configured.' }, 503)
+    }
+
+    const authorization = request.headers.get('Authorization')
+    const apiKey = request.headers.get('apikey')
+    const hasValidBearer = Boolean(authorization?.startsWith('Bearer '))
+    const hasValidApiKey = Boolean(apiKey && (apiKey === anonKey || apiKey === serviceRoleKey))
+
+    if (!hasValidBearer && !hasValidApiKey) {
+      return jsonResponse({ message: 'Authentication is required.' }, 401)
     }
 
     const requestBody = await request.json().catch(() => null)
@@ -348,6 +422,10 @@ Deno.serve(async (request) => {
     }
     if (publicActions.action === 'verify_member_login_otp') {
       return await verifyMemberLoginOtp(admin, publicActions)
+    }
+
+    if (!hasValidBearer || !authorization) {
+      return jsonResponse({ message: 'The session is not valid.' }, 401)
     }
 
     const userClient = createClient(supabaseUrl, anonKey, {
